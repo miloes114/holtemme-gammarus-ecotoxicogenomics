@@ -18,3 +18,18 @@ authors:
     given-names: Henner
   - family-names: Inostroza
     given-names: Pedro A.
+preferred-citation:
+  type: article
+  title: "Field ecotoxicogenomics reveals transition-specific molecular responses in a freshwater sentinel across a wastewater-impacted river"
+  authors:
+    - family-names: Escobar-Sierra
+      given-names: Camilo
+    - family-names: Weichert
+      given-names: Fabian G.
+    - family-names: Krauss
+      given-names: Martin
+      orcid: "https://orcid.org/0000-0002-0362-4244"
+    - family-names: Hollert
+      given-names: Henner
+    - family-names: Inostroza
+      given-names: Pedro A.
