@@ -78,10 +78,10 @@ biological replication or cross-species validation.
 
 ```{r figure4-output-check}
 data.frame(
-  source = figure_source,
-  pdf = figure4_pdf,
-  png = figure4_png,
-  svg = figure4_svg,
+  source = basename(figure_source),
+  pdf = basename(figure4_pdf),
+  png = basename(figure4_png),
+  svg = basename(figure4_svg),
   png_md5 = unname(tools::md5sum(figure4_png))
 )
 ```

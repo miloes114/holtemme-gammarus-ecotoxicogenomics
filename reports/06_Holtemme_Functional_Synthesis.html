@@ -411,22 +411,18 @@ exploratory hypotheses. Annotation-context evidence is
 hypothesis-generating and is not independent biological replication or
 cross-species validation.</p>
 <pre class="r"><code>data.frame(
-  source = figure_source,
-  pdf = figure4_pdf,
-  png = figure4_png,
-  svg = figure4_svg,
+  source = basename(figure_source),
+  pdf = basename(figure4_pdf),
+  png = basename(figure4_png),
+  svg = basename(figure4_svg),
   png_md5 = unname(tools::md5sum(figure4_png))
 )</code></pre>
-<pre><code>##                                                                                                                                                    source
-## 1 C:\\Users\\camilo\\.codex\\visualizations\\2026\\07\\28\\019fa830-6b0b-7500-8451-facdf35b0402\\stage/support/figure4/figure4_family_cell_provenance.tsv
-##                                                                                                                                             pdf
-## 1 C:/Users/camilo/.codex/visualizations/2026/07/28/019fa830-6b0b-7500-8451-facdf35b0402/stage/render3/figure4_functional_response_landscape.pdf
-##                                                                                                                                             png
-## 1 C:/Users/camilo/.codex/visualizations/2026/07/28/019fa830-6b0b-7500-8451-facdf35b0402/stage/render3/figure4_functional_response_landscape.png
-##                                                                                                                                             svg
-## 1 C:/Users/camilo/.codex/visualizations/2026/07/28/019fa830-6b0b-7500-8451-facdf35b0402/stage/render3/figure4_functional_response_landscape.svg
-##                            png_md5
-## 1 e691768b4923cd50d049deda1afc5936</code></pre>
+<pre><code>##                               source                                       pdf
+## 1 figure4_family_cell_provenance.tsv figure4_functional_response_landscape.pdf
+##                                         png
+## 1 figure4_functional_response_landscape.png
+##                                         svg                          png_md5
+## 1 figure4_functional_response_landscape.svg e691768b4923cd50d049deda1afc5936</code></pre>
 </div>
 
 
