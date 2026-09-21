@@ -1,0 +1,3988 @@
+---
+title: "Holtemme WGCNA network selection"
+author: "Camilo Escobar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+# Purpose and decision framework
+
+This report tests whether the current WGCNA network is sensitive to retaining the
+5,000, 10,000, or 15,000 most variable genes. It reconstructs each network from
+the same 30 individual RNA-seq libraries while keeping the correlation method,
+network type, module-detection settings, and planned site contrasts fixed. The
+soft-thresholding power is re-evaluated separately for each gene set because the
+connectivity distribution changes when additional genes enter the network.
+
+The comparison is not designed to select the network with the highest
+scale-free-topology fit alone. The final gene set should balance network
+connectivity, module assignment, preservation of modules across nested gene
+sets, site-stratified resampling stability, and computational reproducibility.
+Annotation coverage is a secondary practical criterion. Site-contrast
+significance, DEG overlap, enrichment yield, and chemistry are downstream
+sensitivity results and cannot determine network parameters. Gene-set
+preservation in this report is a
+feature-selection sensitivity analysis and does not replace the site-stratified
+resampling analysis required to evaluate module robustness.
+
+# 0. Setup and configuration
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+
+options(stringsAsFactors = FALSE)
+set.seed(2212)
+
+project_dir <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+source(file.path(project_dir, "support", "workflow_helpers.R"))
+sync_rstudio_pandoc()
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(purrr)
+  library(stringr)
+  library(ggplot2)
+  library(matrixStats)
+  library(WGCNA)
+})
+source(file.path(project_dir, "support", "wgcna_finalisation_helpers.R"))
+
+WGCNA::allowWGCNAThreads(nThreads = 2)
+
+results_dir <- make_results_dir(
+  project_dir,
+  7,
+  "WGCNA_Network_Selection"
+)
+tables_dir <- file.path(results_dir, "tables")
+plots_dir <- file.path(results_dir, "plots")
+objects_dir <- file.path(results_dir, "objects")
+logs_dir <- file.path(results_dir, "logs")
+
+invisible(lapply(
+  c(results_dir, tables_dir, plots_dir, objects_dir, logs_dir),
+  dir.create,
+  recursive = TRUE,
+  showWarnings = FALSE
+))
+
+# Gene-set sensitivity design.
+gene_set_sizes <- c(5000L, 10000L, 15000L)
+reference_gene_set_size <- 5000L
+candidate_powers <- c(1:10, seq(12, 20, by = 2))
+soft_threshold_target <- 0.80
+reference_power_for_comparison <- 12
+power_sensitivity_candidates <- c(12L, 14L, 16L, 18L, 20L)
+power_22_archive_sensitivity <- 22L
+power_resample_replicates <- 10L
+power_resample_libraries_per_site <- 4L
+power_sensitivity_seed <- 2412L
+very_low_connectivity_threshold <- 1
+adequate_median_connectivity_threshold <- 10
+maximum_scale_free_fit_deficit <- 0.03
+candidate_module_moderate_median_jaccard <- 0.50
+candidate_module_moderate_minimum_jaccard <- 0.25
+candidate_module_moderate_eigengene_agreement <- 0.80
+reuse_power_sensitivity_cache <- TRUE
+
+# Network settings evaluated for the final coexpression analysis.
+network_type <- "signed"
+correlation_type <- "bicor"
+max_p_outliers <- 0.10
+minimum_module_size <- 50L
+merge_cut_height <- 0.25
+deep_split <- 2
+pam_respects_dendro <- FALSE
+
+# A finite block size reduces peak memory use for the 10,000- and 15,000-gene
+# networks. Set this to max(gene_set_sizes) only when sufficient RAM is
+# available and a single-block comparison is required.
+max_block_size <- 6000L
+reuse_network_cache <- TRUE
+
+site_order <- c("H2", "H3", "H4", "H5", "H6", "H7")
+
+planned_contrasts <- tibble::tribble(
+  ~contrast, ~contrast_panel, ~numerator_site, ~denominator_site, ~contrast_role,
+  "HOL02_vs_HOL01", "First WWTP transition\nH3 vs H2", "HOL02", "HOL01",
+  "first local WWTP transition",
+  "HOL05_vs_HOL04", "Second WWTP transition\nH6 vs H5", "HOL05", "HOL04",
+  "second local WWTP transition",
+  "HOL06_vs_HOL01", "Furthest downstream site\nH7 vs H2", "HOL06", "HOL01",
+  "downstream integrative comparison"
+)
+
+large_effect_abs_hedges_g <- 1.00
+nominal_p_threshold <- 0.05
+fdr_threshold <- 0.05
+
+write_csv_safe <- function(x, path) {
+  readr::write_csv(x, path, na = "")
+  invisible(path)
+}
+
+save_plot_bundle <- function(plot, stem, width = 9, height = 6) {
+  ggplot2::ggsave(
+    paste0(stem, ".png"),
+    plot,
+    width = width,
+    height = height,
+    dpi = 320,
+    bg = "white"
+  )
+  ggplot2::ggsave(
+    paste0(stem, ".pdf"),
+    plot,
+    width = width,
+    height = height,
+    bg = "white"
+  )
+  if (requireNamespace("svglite", quietly = TRUE)) {
+    ggplot2::ggsave(
+      paste0(stem, ".svg"),
+      plot,
+      width = width,
+      height = height,
+      bg = "white"
+    )
+  }
+  invisible(stem)
+}
+
+theme_publication <- function(base_size = 11) {
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(face = "bold"),
+      axis.title = ggplot2::element_text(face = "bold"),
+      strip.text = ggplot2::element_text(face = "bold"),
+      legend.position = "right"
+    )
+}
+
+safe_chr <- function(x) {
+  x <- stringr::str_squish(as.character(x))
+  x[!nzchar(x)] <- NA_character_
+  x
+}
+
+safe_divide <- function(numerator, denominator) {
+  dplyr::if_else(
+    is.finite(denominator) & denominator > 0,
+    numerator / denominator,
+    NA_real_
+  )
+}
+
+hedges_g_two_group <- function(x_numerator, x_denominator) {
+  x_numerator <- as.numeric(x_numerator)
+  x_denominator <- as.numeric(x_denominator)
+  x_numerator <- x_numerator[is.finite(x_numerator)]
+  x_denominator <- x_denominator[is.finite(x_denominator)]
+
+  n_num <- length(x_numerator)
+  n_den <- length(x_denominator)
+  if (n_num < 2L || n_den < 2L) return(NA_real_)
+
+  pooled_df <- n_num + n_den - 2L
+  pooled_var <- (
+    (n_num - 1L) * stats::var(x_numerator) +
+      (n_den - 1L) * stats::var(x_denominator)
+  ) / pooled_df
+
+  if (!is.finite(pooled_var) || pooled_var <= 0) return(NA_real_)
+
+  cohen_d <- (
+    mean(x_numerator) - mean(x_denominator)
+  ) / sqrt(pooled_var)
+
+  correction_j <- 1 - 3 / (4 * (n_num + n_den) - 9)
+  correction_j * cohen_d
+}
+
+select_soft_power <- function(soft_tbl, target = 0.80) {
+  eligible <- soft_tbl %>%
+    dplyr::filter(
+      is.finite(.data$scale_free_fit),
+      .data$scale_free_fit >= target
+    )
+
+  if (nrow(eligible) > 0L) {
+    selected <- eligible %>%
+      dplyr::slice_min(
+        order_by = .data$power,
+        n = 1,
+        with_ties = FALSE
+      )
+    rule <- paste0("lowest power reaching R2 >= ", target)
+  } else {
+    selected <- soft_tbl %>%
+      dplyr::filter(is.finite(.data$scale_free_fit)) %>%
+      dplyr::arrange(
+        dplyr::desc(.data$scale_free_fit),
+        .data$power
+      ) %>%
+      dplyr::slice_head(n = 1)
+    rule <- "highest available scale-free fit; target not reached"
+  }
+
+  if (nrow(selected) == 0L) {
+    stop("No finite soft-threshold diagnostics were available.")
+  }
+
+  list(
+    power = as.numeric(selected$power[[1]]),
+    rule = rule,
+    row = selected
+  )
+}
+
+fit_one_module_contrast <- function(
+  values,
+  site_ids,
+  numerator_site,
+  denominator_site
+) {
+  contrast_df <- tibble::tibble(
+    value = as.numeric(values),
+    site_id = as.character(site_ids)
+  ) %>%
+    dplyr::filter(
+      !is.na(.data$site_id),
+      is.finite(.data$value)
+    ) %>%
+    dplyr::mutate(
+      site_id = factor(
+        .data$site_id,
+        levels = unique(as.character(site_ids))
+      )
+    )
+
+  numerator_values <- contrast_df$value[
+    contrast_df$site_id == numerator_site
+  ]
+  denominator_values <- contrast_df$value[
+    contrast_df$site_id == denominator_site
+  ]
+
+  if (
+    length(numerator_values) < 2L ||
+      length(denominator_values) < 2L
+  ) {
+    return(tibble::tibble(
+      n_numerator = length(numerator_values),
+      n_denominator = length(denominator_values),
+      numerator_mean = mean(numerator_values, na.rm = TRUE),
+      denominator_mean = mean(denominator_values, na.rm = TRUE),
+      eigengene_difference = NA_real_,
+      conf_low = NA_real_,
+      conf_high = NA_real_,
+      hedges_g = NA_real_,
+      p_value = NA_real_
+    ))
+  }
+
+  fit <- stats::lm(value ~ 0 + site_id, data = contrast_df)
+  beta_hat <- stats::coef(fit)
+  beta_vcov <- stats::vcov(fit)
+  residual_df <- stats::df.residual(fit)
+  numerator_coef <- paste0("site_id", numerator_site)
+  denominator_coef <- paste0("site_id", denominator_site)
+
+  if (!all(c(numerator_coef, denominator_coef) %in% names(beta_hat))) {
+    stop("A planned contrast site is absent from the common six-site model.")
+  }
+
+  contrast_vector <- stats::setNames(
+    rep(0, length(beta_hat)),
+    names(beta_hat)
+  )
+  contrast_vector[[numerator_coef]] <- 1
+  contrast_vector[[denominator_coef]] <- -1
+  estimate <- sum(contrast_vector * beta_hat)
+  standard_error <- sqrt(as.numeric(
+    t(contrast_vector) %*% beta_vcov %*% contrast_vector
+  ))
+  t_statistic <- estimate / standard_error
+  p_value <- 2 * stats::pt(-abs(t_statistic), df = residual_df)
+  critical_t <- stats::qt(0.975, df = residual_df)
+
+  tibble::tibble(
+    n_numerator = length(numerator_values),
+    n_denominator = length(denominator_values),
+    numerator_mean = mean(numerator_values),
+    denominator_mean = mean(denominator_values),
+    eigengene_difference = estimate,
+    conf_low = estimate - critical_t * standard_error,
+    conf_high = estimate + critical_t * standard_error,
+    hedges_g = hedges_g_two_group(
+      numerator_values,
+      denominator_values
+    ),
+    p_value = p_value
+  )
+}
+
+fit_planned_module_contrasts <- function(
+  eigengene_tbl,
+  metadata_tbl,
+  network_label,
+  network_size,
+  module_assignment,
+  contrast_tbl
+) {
+  me_columns <- grep("^ME", names(eigengene_tbl), value = TRUE)
+  me_columns <- setdiff(me_columns, "MEgrey")
+
+  module_sizes <- module_assignment %>%
+    dplyr::filter(.data$module != "grey") %>%
+    dplyr::count(
+      .data$module,
+      .data$module_label,
+      name = "module_size"
+    )
+
+  result <- purrr::map_dfr(
+    me_columns,
+    function(current_module_label) {
+      purrr::pmap_dfr(
+        contrast_tbl,
+        function(
+          contrast,
+          contrast_panel,
+          numerator_site,
+          denominator_site,
+          contrast_role
+        ) {
+          test_row <- fit_one_module_contrast(
+            values = eigengene_tbl[[current_module_label]],
+            site_ids = metadata_tbl$site_id,
+            numerator_site = numerator_site,
+            denominator_site = denominator_site
+          )
+
+          test_row %>%
+            dplyr::mutate(
+              network_label = network_label,
+              network_size = network_size,
+              module_label = current_module_label,
+              module = stringr::str_remove(
+                current_module_label,
+                "^ME"
+              ),
+              contrast = contrast,
+              contrast_panel = contrast_panel,
+              numerator_site = numerator_site,
+              denominator_site = denominator_site,
+              contrast_role = contrast_role,
+              .before = 1
+            )
+        }
+      )
+    }
+  ) %>%
+    dplyr::left_join(
+      module_sizes,
+      by = c("module", "module_label")
+    ) %>%
+    dplyr::mutate(
+      q_global_network = stats::p.adjust(
+        .data$p_value,
+        method = "BH"
+      )
+    ) %>%
+    dplyr::group_by(.data$contrast) %>%
+    dplyr::mutate(
+      q_within_contrast = stats::p.adjust(
+        .data$p_value,
+        method = "BH"
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      fdr_supported = .data$q_global_network < fdr_threshold,
+      large_nominal_effect =
+        abs(.data$hedges_g) >= large_effect_abs_hedges_g &
+        .data$p_value < nominal_p_threshold
+    )
+
+  result
+}
+
+run_network_for_gene_set <- function(
+  requested_gene_n,
+  ranked_gene_ids,
+  expression_matrix,
+  metadata_aligned
+) {
+  network_label <- paste0("G", requested_gene_n)
+  message("Starting ", network_label, " network")
+
+  selected_gene_ids <- utils::head(
+    ranked_gene_ids,
+    min(requested_gene_n, length(ranked_gene_ids))
+  )
+
+  dat_expr <- t(
+    expression_matrix[selected_gene_ids, , drop = FALSE]
+  )
+  rownames(dat_expr) <- metadata_aligned$sample_code
+
+  gsg <- WGCNA::goodSamplesGenes(dat_expr, verbose = 0)
+  if (!gsg$allOK) {
+    dat_expr <- dat_expr[
+      gsg$goodSamples,
+      gsg$goodGenes,
+      drop = FALSE
+    ]
+  }
+
+  metadata_network <- metadata_aligned %>%
+    dplyr::filter(.data$sample_code %in% rownames(dat_expr)) %>%
+    dplyr::slice(match(rownames(dat_expr), .data$sample_code))
+
+  sft <- WGCNA::pickSoftThreshold(
+    dat_expr,
+    powerVector = candidate_powers,
+    networkType = network_type,
+    corFnc = correlation_type,
+    corOptions = list(maxPOutliers = max_p_outliers),
+    verbose = 0
+  )
+
+  soft_tbl <- tibble::as_tibble(sft$fitIndices) %>%
+    dplyr::transmute(
+      network_label = network_label,
+      requested_gene_n = requested_gene_n,
+      retained_gene_n = ncol(dat_expr),
+      power = .data$Power,
+      scale_free_fit = .data$SFT.R.sq,
+      slope = .data$slope,
+      mean_connectivity = .data$mean.k.,
+      median_connectivity = .data$median.k.,
+      max_connectivity = .data$max.k.
+    )
+
+  power_decision <- select_soft_power(
+    soft_tbl,
+    target = soft_threshold_target
+  )
+  selected_power <- power_decision$power
+
+  net <- WGCNA::blockwiseModules(
+    dat_expr,
+    power = selected_power,
+    networkType = network_type,
+    TOMType = network_type,
+    corType = correlation_type,
+    maxPOutliers = max_p_outliers,
+    minModuleSize = minimum_module_size,
+    mergeCutHeight = merge_cut_height,
+    deepSplit = deep_split,
+    numericLabels = FALSE,
+    pamRespectsDendro = pam_respects_dendro,
+    maxBlockSize = min(max_block_size, ncol(dat_expr)),
+    saveTOMs = FALSE,
+    verbose = 0
+  )
+
+  raw_module_colors <- as.character(net$colors)
+  names(raw_module_colors) <- colnames(dat_expr)
+  corrected_modules <- wgcna_correct_undersized_modules(
+    raw_module_colors,
+    minimum_module_size
+  )
+  module_colors <- corrected_modules$colors
+  oriented_modules <- wgcna_orient_eigengenes(
+    dat_expr,
+    module_colors,
+    max_p_outliers = max_p_outliers
+  )
+  module_eigengenes <- oriented_modules$eigengenes
+
+  module_assignment <- tibble::tibble(
+    network_label = network_label,
+    network_size = requested_gene_n,
+    gene_id = names(module_colors),
+    module = unname(module_colors),
+    module_label = paste0("ME", unname(module_colors))
+  )
+
+  kme_tbl <- tibble::as_tibble(
+    WGCNA::signedKME(
+      dat_expr,
+      module_eigengenes,
+      outputColumnName = "kME",
+      corFnc = correlation_type,
+      corOptions = paste0(
+        "maxPOutliers = ",
+        max_p_outliers
+      )
+    ),
+    rownames = "gene_id"
+  )
+
+  module_assignment$module_kME_signed <- NA_real_
+  for (current_module in unique(module_assignment$module)) {
+    kme_column <- paste0("kME", current_module)
+    current_rows <- module_assignment$module == current_module
+    if (kme_column %in% names(kme_tbl)) {
+      module_assignment$module_kME_signed[current_rows] <-
+        kme_tbl[[kme_column]][
+          match(
+            module_assignment$gene_id[current_rows],
+            kme_tbl$gene_id
+          )
+        ]
+    }
+  }
+
+  module_assignment <- module_assignment %>%
+    dplyr::mutate(
+      module_kME_abs = abs(.data$module_kME_signed)
+    )
+
+  module_summary <- module_assignment %>%
+    dplyr::count(
+      .data$network_label,
+      .data$network_size,
+      .data$module,
+      .data$module_label,
+      name = "n_genes"
+    ) %>%
+    dplyr::mutate(
+      module_type = dplyr::if_else(
+        .data$module == "grey",
+        "unassigned",
+        "assigned"
+      )
+    ) %>%
+    dplyr::arrange(
+      .data$module_type,
+      dplyr::desc(.data$n_genes)
+    )
+
+  assigned_module_sizes_for_assertion <- module_summary$n_genes[
+    module_summary$module != "grey"
+  ]
+  if (length(assigned_module_sizes_for_assertion) > 0L &&
+      any(assigned_module_sizes_for_assertion < minimum_module_size)) {
+    stop(network_label, " retained an assigned module below minModuleSize.")
+  }
+  module_labels_from_colors <- paste0("ME", sort(unique(module_colors)))
+  module_labels_from_mes <- names(module_eigengenes)
+  if (!setequal(module_labels_from_colors, module_labels_from_mes)) {
+    stop(network_label, " module-colour and eigengene labels do not match.")
+  }
+
+  eigengene_tbl <- tibble::as_tibble(
+    module_eigengenes,
+    rownames = "sample_code"
+  ) %>%
+    dplyr::left_join(
+      metadata_network %>%
+        dplyr::select(
+          .data$sample_code,
+          .data$site_id,
+          .data$station_tag,
+          dplyr::any_of(c(
+            "display_label",
+            "site_name",
+            "station_order"
+          ))
+        ),
+      by = "sample_code"
+    )
+
+  contrast_tbl <- fit_planned_module_contrasts(
+    eigengene_tbl = eigengene_tbl,
+    metadata_tbl = metadata_network,
+    network_label = network_label,
+    network_size = requested_gene_n,
+    module_assignment = module_assignment,
+    contrast_tbl = planned_contrasts
+  )
+
+  selected_soft_row <- power_decision$row
+
+  assigned_sizes <- module_summary$n_genes[
+    module_summary$module_type == "assigned"
+  ]
+  grey_n <- sum(
+    module_summary$n_genes[module_summary$module == "grey"],
+    na.rm = TRUE
+  )
+  assigned_n <- ncol(dat_expr) - grey_n
+
+  network_summary <- tibble::tibble(
+    network_label = network_label,
+    requested_gene_n = requested_gene_n,
+    retained_gene_n = ncol(dat_expr),
+    retained_sample_n = nrow(dat_expr),
+    selected_power = selected_power,
+    selected_power_rule = power_decision$rule,
+    selected_scale_free_fit = selected_soft_row$scale_free_fit[[1]],
+    selected_slope = selected_soft_row$slope[[1]],
+    selected_mean_connectivity =
+      selected_soft_row$mean_connectivity[[1]],
+    selected_median_connectivity =
+      selected_soft_row$median_connectivity[[1]],
+    target_reached =
+      selected_soft_row$scale_free_fit[[1]] >= soft_threshold_target,
+    reference_power_scale_free_fit = soft_tbl$scale_free_fit[
+      match(reference_power_for_comparison, soft_tbl$power)
+    ],
+    reference_power_mean_connectivity = soft_tbl$mean_connectivity[
+      match(reference_power_for_comparison, soft_tbl$power)
+    ],
+    n_assigned_modules = sum(
+      module_summary$module_type == "assigned"
+    ),
+    n_assigned_genes = assigned_n,
+    assigned_gene_fraction = assigned_n / ncol(dat_expr),
+    n_grey_genes = grey_n,
+    grey_gene_fraction = grey_n / ncol(dat_expr),
+    median_assigned_module_size = if (
+      length(assigned_sizes) > 0L
+    ) stats::median(assigned_sizes) else NA_real_,
+    minimum_assigned_module_size = if (
+      length(assigned_sizes) > 0L
+    ) min(assigned_sizes) else NA_real_,
+    maximum_assigned_module_size = if (
+      length(assigned_sizes) > 0L
+    ) max(assigned_sizes) else NA_real_,
+    n_blocks = length(net$blockGenes),
+    max_block_size_setting = min(max_block_size, ncol(dat_expr)),
+    n_fdr_supported_contrasts = sum(
+      contrast_tbl$fdr_supported,
+      na.rm = TRUE
+    ),
+    n_large_nominal_contrasts = sum(
+      contrast_tbl$large_nominal_effect,
+      na.rm = TRUE
+    )
+  )
+
+  write_csv_safe(
+    soft_tbl,
+    file.path(
+      tables_dir,
+      paste0(network_label, "_soft_threshold_diagnostics.csv")
+    )
+  )
+  write_csv_safe(
+    module_summary,
+    file.path(
+      tables_dir,
+      paste0(network_label, "_module_summary.csv")
+    )
+  )
+  write_csv_safe(
+    oriented_modules$orientation,
+    file.path(tables_dir, paste0(network_label, "_eigengene_orientation.csv"))
+  )
+  write_csv_safe(
+    tibble::tibble(
+      raw_module = names(corrected_modules$raw_sizes),
+      raw_module_size = as.integer(corrected_modules$raw_sizes)
+    ) %>%
+      dplyr::mutate(
+        below_declared_minimum =
+          .data$raw_module != "grey" &
+          .data$raw_module_size < minimum_module_size,
+        final_action = dplyr::if_else(
+          .data$below_declared_minimum,
+          "reclassified_to_exact_grey_before_testing",
+          "retained"
+        )
+      ),
+    file.path(tables_dir, paste0(network_label, "_module_identity_audit.csv"))
+  )
+  write_csv_safe(
+    module_assignment,
+    file.path(
+      tables_dir,
+      paste0(network_label, "_gene_module_membership.csv")
+    )
+  )
+  write_csv_safe(
+    eigengene_tbl,
+    file.path(
+      tables_dir,
+      paste0(network_label, "_module_eigengenes_by_sample.csv")
+    )
+  )
+  write_csv_safe(
+    contrast_tbl,
+    file.path(
+      tables_dir,
+      paste0(network_label, "_planned_module_contrasts.csv")
+    )
+  )
+
+  rm(net, dat_expr, kme_tbl)
+  invisible(gc())
+
+  list(
+    network_label = network_label,
+    network_size = requested_gene_n,
+    selected_gene_ids = selected_gene_ids,
+    soft = soft_tbl,
+    summary = network_summary,
+    modules = module_summary,
+    assignment = module_assignment,
+    eigengenes = eigengene_tbl,
+    orientation = oriented_modules$orientation,
+    raw_undersized_modules = corrected_modules$undersized_modules,
+    contrasts = contrast_tbl
+  )
+}
+
+load_or_run_network_for_gene_set <- function(
+  requested_gene_n,
+  ranked_gene_ids,
+  expression_matrix,
+  metadata_aligned,
+  input_signature
+) {
+  network_label <- paste0("G", requested_gene_n)
+  selected_ids <- utils::head(
+    ranked_gene_ids,
+    min(requested_gene_n, length(ranked_gene_ids))
+  )
+  cache_signature <- paste(
+    input_signature,
+    paste0("network_label=", network_label),
+    paste0(
+      "selected_gene_hash=",
+      digest::digest(selected_ids, algo = "xxhash64")
+    ),
+    paste0("WGCNA=", as.character(utils::packageVersion("WGCNA"))),
+    paste0("powers=", paste(candidate_powers, collapse = ";")),
+    paste0("target=", soft_threshold_target),
+    paste0("network_type=", network_type),
+    paste0("correlation_type=", correlation_type),
+    paste0("max_p_outliers=", max_p_outliers),
+    paste0("minimum_module_size=", minimum_module_size),
+    paste0("merge_cut_height=", merge_cut_height),
+    paste0("deep_split=", deep_split),
+    paste0("pam_respects_dendro=", pam_respects_dendro),
+    paste0("max_block_size=", max_block_size),
+    "finalisation_validation=v2",
+    sep = "||"
+  )
+  cache_file <- file.path(
+    objects_dir,
+    paste0(network_label, "_network_result_cache.rds")
+  )
+
+  if (reuse_network_cache && file.exists(cache_file)) {
+    cached <- readRDS(cache_file)
+    if (
+      is.list(cached) &&
+        identical(cached$cache_signature, cache_signature) &&
+        is.list(cached$result)
+    ) {
+      message("Reusing validated cache for ", network_label)
+      result <- cached$result
+      result$contrasts <- fit_planned_module_contrasts(
+        eigengene_tbl = result$eigengenes,
+        metadata_tbl = metadata_aligned,
+        network_label = result$network_label,
+        network_size = result$network_size,
+        module_assignment = result$assignment,
+        contrast_tbl = planned_contrasts
+      )
+      result$summary <- result$summary %>%
+        dplyr::mutate(
+          n_fdr_supported_contrasts = sum(
+            result$contrasts$fdr_supported,
+            na.rm = TRUE
+          ),
+          n_large_nominal_contrasts = sum(
+            result$contrasts$large_nominal_effect,
+            na.rm = TRUE
+          )
+        )
+      write_csv_safe(
+        result$contrasts,
+        file.path(
+          tables_dir,
+          paste0(network_label, "_planned_module_contrasts.csv")
+        )
+      )
+      cached$result <- result
+      saveRDS(cached, cache_file, compress = FALSE)
+      return(result)
+    }
+  }
+
+  result <- run_network_for_gene_set(
+    requested_gene_n = requested_gene_n,
+    ranked_gene_ids = ranked_gene_ids,
+    expression_matrix = expression_matrix,
+    metadata_aligned = metadata_aligned
+  )
+  saveRDS(
+    list(cache_signature = cache_signature, result = result),
+    cache_file,
+    compress = FALSE
+  )
+  result
+}
+
+compare_network_pair <- function(reference_result, test_result) {
+  reference_label <- reference_result$network_label
+  test_label <- test_result$network_label
+
+  reference_assignment <- reference_result$assignment %>%
+    dplyr::select(
+      gene_id,
+      reference_module = module,
+      reference_module_label = module_label
+    )
+  test_assignment <- test_result$assignment %>%
+    dplyr::select(
+      gene_id,
+      test_module = module,
+      test_module_label = module_label
+    )
+
+  shared_assignment <- reference_assignment %>%
+    dplyr::inner_join(test_assignment, by = "gene_id")
+
+  reference_modules <- shared_assignment %>%
+    dplyr::filter(.data$reference_module != "grey") %>%
+    dplyr::distinct(
+      .data$reference_module,
+      .data$reference_module_label
+    )
+
+  test_assigned_modules <- shared_assignment %>%
+    dplyr::filter(.data$test_module != "grey") %>%
+    dplyr::distinct(
+      .data$test_module,
+      .data$test_module_label
+    )
+
+  reference_eigengenes <- reference_result$eigengenes
+  test_eigengenes <- test_result$eigengenes
+
+  purrr::pmap_dfr(
+    reference_modules,
+    function(reference_module, reference_module_label) {
+      reference_gene_set <- shared_assignment$gene_id[
+        shared_assignment$reference_module == reference_module
+      ]
+      reference_to_grey_n <- sum(
+        shared_assignment$reference_module == reference_module &
+          shared_assignment$test_module == "grey"
+      )
+
+      candidate_matches <- purrr::pmap_dfr(
+        test_assigned_modules,
+        function(test_module, test_module_label) {
+          test_gene_set <- shared_assignment$gene_id[
+            shared_assignment$test_module == test_module
+          ]
+          intersection_n <- length(intersect(
+            reference_gene_set,
+            test_gene_set
+          ))
+          union_n <- length(union(
+            reference_gene_set,
+            test_gene_set
+          ))
+
+          tibble::tibble(
+            test_module = test_module,
+            test_module_label = test_module_label,
+            intersection_n = intersection_n,
+            union_n = union_n,
+            jaccard = if (
+              union_n > 0L
+            ) intersection_n / union_n else NA_real_,
+            reference_recovery_fraction = if (
+              length(reference_gene_set) > 0L
+            ) intersection_n / length(reference_gene_set) else NA_real_,
+            test_purity_fraction = if (
+              length(test_gene_set) > 0L
+            ) intersection_n / length(test_gene_set) else NA_real_
+          )
+        }
+      ) %>%
+        dplyr::arrange(
+          dplyr::desc(.data$jaccard),
+          dplyr::desc(.data$intersection_n)
+        )
+
+      best_match <- candidate_matches %>%
+        dplyr::slice_head(n = 1)
+
+      if (nrow(best_match) == 0L) {
+        return(tibble::tibble(
+          reference_network = reference_label,
+          test_network = test_label,
+          reference_size = reference_result$network_size,
+          test_size = test_result$network_size,
+          reference_module = reference_module,
+          reference_module_label = reference_module_label,
+          test_module = NA_character_,
+          test_module_label = NA_character_,
+          reference_module_shared_n = length(reference_gene_set),
+          reference_to_test_grey_n = reference_to_grey_n,
+          reference_to_test_grey_fraction = safe_divide(
+            reference_to_grey_n,
+            length(reference_gene_set)
+          ),
+          intersection_n = 0L,
+          union_n = NA_integer_,
+          jaccard = NA_real_,
+          reference_recovery_fraction = NA_real_,
+          test_purity_fraction = NA_real_,
+          eigengene_profile_cor = NA_real_,
+          eigengene_profile_abs_cor = NA_real_,
+          preservation_class = "not_matched"
+        ))
+      }
+
+      test_module_label <- best_match$test_module_label[[1]]
+      profile_cor <- NA_real_
+      if (
+        reference_module_label %in% names(reference_eigengenes) &&
+          test_module_label %in% names(test_eigengenes)
+      ) {
+        profile_pair <- reference_eigengenes %>%
+          dplyr::transmute(
+            sample_code = .data$sample_code,
+            reference_value = .data[[reference_module_label]]
+          ) %>%
+          dplyr::inner_join(
+            test_eigengenes %>%
+              dplyr::transmute(
+                sample_code = .data$sample_code,
+                test_value = .data[[test_module_label]]
+              ),
+            by = "sample_code"
+          )
+
+        profile_cor <- WGCNA::bicor(
+          profile_pair$reference_value,
+          profile_pair$test_value,
+          use = "pairwise.complete.obs",
+          maxPOutliers = max_p_outliers
+        ) %>%
+          as.numeric() %>%
+          first()
+      }
+
+      preservation_class <- dplyr::case_when(
+        is.finite(best_match$jaccard[[1]]) &&
+          best_match$jaccard[[1]] >= 0.60 &&
+          is.finite(profile_cor) &&
+          abs(profile_cor) >= 0.75 ~ "high",
+        is.finite(best_match$jaccard[[1]]) &&
+          best_match$jaccard[[1]] >= 0.40 &&
+          is.finite(profile_cor) &&
+          abs(profile_cor) >= 0.60 ~ "moderate",
+        TRUE ~ "low"
+      )
+
+      tibble::tibble(
+        reference_network = reference_label,
+        test_network = test_label,
+        reference_size = reference_result$network_size,
+        test_size = test_result$network_size,
+        reference_module = reference_module,
+        reference_module_label = reference_module_label,
+        test_module = best_match$test_module[[1]],
+        test_module_label = test_module_label,
+        reference_module_shared_n = length(reference_gene_set),
+        reference_to_test_grey_n = reference_to_grey_n,
+        reference_to_test_grey_fraction = safe_divide(
+          reference_to_grey_n,
+          length(reference_gene_set)
+        ),
+        intersection_n = best_match$intersection_n[[1]],
+        union_n = best_match$union_n[[1]],
+        jaccard = best_match$jaccard[[1]],
+        reference_recovery_fraction =
+          best_match$reference_recovery_fraction[[1]],
+        test_purity_fraction = best_match$test_purity_fraction[[1]],
+        eigengene_profile_cor = profile_cor,
+        eigengene_profile_abs_cor = abs(profile_cor),
+        preservation_class = preservation_class
+      )
+    }
+  )
+}
+```
+
+# 1. Input manifest
+
+```{r input-manifest}
+vst_file <- file.path(
+  project_dir,
+  "Results_01_Global_Transcriptome_Structure",
+  "matrices",
+  "vst_matrix_germany.tsv"
+)
+metadata_file <- file.path(
+  project_dir,
+  "Results_01_Global_Transcriptome_Structure",
+  "tables",
+  "metadata_matched_germany.csv"
+)
+station_file <- file.path(
+  project_dir,
+  "01_metadata",
+  "station_crosswalk.csv"
+)
+annotation_file <- file.path(
+  project_dir,
+  "Results_03_Differential_Expression",
+  "tables",
+  "gene_annotation_collapsed_from_trinotate.csv"
+)
+aggregate_deg_file <- file.path(
+  project_dir,
+  "Results_03_Differential_Expression",
+  "tables",
+  "reference_significant_deg_table.csv"
+)
+deg_source_tbl <- planned_contrasts %>%
+  dplyr::transmute(
+    contrast = .data$contrast,
+    numerator_site = .data$numerator_site,
+    denominator_site = .data$denominator_site,
+    path = file.path(
+      project_dir,
+      "Results_03_Differential_Expression",
+      "contrast_tables",
+      .data$contrast,
+      paste0(.data$contrast, "_significant_DEGs.csv")
+    )
+  )
+gene_to_go_file <- file.path(
+  project_dir,
+  "Results_04_EchoGO_Seed_Preparation",
+  "derived_inputs",
+  "gene_to_go_primary_eggnog_long.csv"
+)
+
+input_manifest <- dplyr::bind_rows(tibble::tribble(
+  ~input_id, ~path, ~required, ~role,
+  "vst_expression", vst_file, TRUE,
+  "gene-level VST expression matrix",
+  "matched_metadata", metadata_file, TRUE,
+  "sample and site metadata",
+  "station_crosswalk", station_file, TRUE,
+  "station order and site labels",
+  "collapsed_annotation", annotation_file, FALSE,
+  "gene annotation coverage",
+  "aggregate_reference_degs", aggregate_deg_file, FALSE,
+  "reference-only DEG aggregate retained for provenance; not used here",
+  "primary_gene_to_go", gene_to_go_file, FALSE,
+  "GO-mapping coverage"
+), deg_source_tbl %>%
+  dplyr::transmute(
+    input_id = paste0("focal_degs_", .data$contrast),
+    path = .data$path,
+    required = TRUE,
+    role = paste0(
+      "required DEG source for ", .data$numerator_site,
+      " versus ", .data$denominator_site
+    )
+  )) %>%
+  dplyr::mutate(present = file.exists(.data$path))
+
+write_csv_safe(
+  input_manifest,
+  file.path(tables_dir, "input_manifest.csv")
+)
+
+knitr::kable(
+  input_manifest,
+  caption = "Inputs for the WGCNA gene-set sensitivity analysis."
+)
+
+missing_required <- input_manifest %>%
+  dplyr::filter(.data$required, !.data$present)
+
+if (nrow(missing_required) > 0L) {
+  stop(
+    "Missing required inputs:\n",
+    paste(missing_required$path, collapse = "\n")
+  )
+}
+```
+
+# 2. Load and rank the expression matrix
+
+Genes are ranked once by variance across all 30 VST libraries. The 5,000-,
+10,000-, and 15,000-gene networks are therefore nested and differ only by the
+number of lower-ranked genes admitted to the network. Site labels are not used
+for feature selection.
+
+```{r load-and-rank-expression}
+station_tbl <- readr::read_csv(
+  station_file,
+  show_col_types = FALSE
+)
+metadata_tbl <- readr::read_csv(
+  metadata_file,
+  show_col_types = FALSE
+) %>%
+  dplyr::mutate(
+    sample_code = as.character(.data$sample_code),
+    site_id = as.character(.data$site_id),
+    station_tag = as.character(.data$station_tag)
+  )
+
+vst_tbl <- readr::read_tsv(
+  vst_file,
+  show_col_types = FALSE
+)
+
+sample_columns <- intersect(
+  metadata_tbl$sample_code,
+  setdiff(names(vst_tbl), "gene_id")
+)
+
+if (length(sample_columns) != nrow(metadata_tbl)) {
+  stop(
+    "Sample mismatch: ",
+    length(sample_columns),
+    " VST columns versus ",
+    nrow(metadata_tbl),
+    " metadata rows."
+  )
+}
+
+metadata_aligned <- metadata_tbl %>%
+  dplyr::slice(match(sample_columns, .data$sample_code)) %>%
+  dplyr::left_join(
+    station_tbl %>%
+      dplyr::select(
+        .data$legacy_site_id,
+        dplyr::any_of(c(
+          "station_order",
+          "chemistry_series_order",
+          "site_context",
+          "chemistry_status"
+        ))
+      ),
+    by = c("site_id" = "legacy_site_id")
+  )
+
+expression_tbl <- vst_tbl %>%
+  dplyr::select(
+    .data$gene_id,
+    dplyr::all_of(sample_columns)
+  ) %>%
+  dplyr::distinct(.data$gene_id, .keep_all = TRUE)
+
+expression_matrix <- as.matrix(
+  expression_tbl[, sample_columns]
+)
+rownames(expression_matrix) <- expression_tbl$gene_id
+storage.mode(expression_matrix) <- "double"
+
+gene_variance <- matrixStats::rowVars(
+  expression_matrix,
+  na.rm = TRUE
+)
+names(gene_variance) <- rownames(expression_matrix)
+
+valid_gene <- is.finite(gene_variance) & gene_variance > 0
+expression_matrix <- expression_matrix[valid_gene, , drop = FALSE]
+gene_variance <- gene_variance[valid_gene]
+ranked_gene_ids <- names(
+  sort(gene_variance, decreasing = TRUE)
+)
+
+if (length(ranked_gene_ids) < min(gene_set_sizes)) {
+  stop(
+    "Fewer than ",
+    min(gene_set_sizes),
+    " non-zero-variance genes are available."
+  )
+}
+
+available_gene_set_sizes <- gene_set_sizes[
+  gene_set_sizes <= length(ranked_gene_ids)
+]
+if (length(available_gene_set_sizes) == 0L) {
+  stop("None of the requested gene-set sizes can be constructed.")
+}
+if (!all(gene_set_sizes %in% available_gene_set_sizes)) {
+  warning(
+    "Requested sizes exceeding the available non-zero-variance genes were skipped."
+  )
+}
+gene_set_sizes <- available_gene_set_sizes
+
+network_input_info <- file.info(c(vst_file, metadata_file, station_file))
+network_input_signature <- paste(
+  paste(
+    basename(rownames(network_input_info)),
+    network_input_info$size,
+    as.character(unname(tools::md5sum(rownames(network_input_info)))),
+    paste0("samples=", paste(sample_columns, collapse = ";"))
+  ),
+  collapse = "||"
+)
+
+expression_qc <- tibble::tibble(
+  raw_vst_gene_n = nrow(vst_tbl),
+  unique_gene_n = nrow(expression_tbl),
+  nonzero_variance_gene_n = length(ranked_gene_ids),
+  sample_n = length(sample_columns),
+  tested_gene_sets = paste(gene_set_sizes, collapse = " | "),
+  maximum_block_size = max_block_size
+)
+
+write_csv_safe(
+  expression_qc,
+  file.path(tables_dir, "expression_input_qc.csv")
+)
+write_csv_safe(
+  tibble::tibble(
+    gene_id = ranked_gene_ids,
+    variance_rank = seq_along(ranked_gene_ids),
+    vst_variance = unname(gene_variance[ranked_gene_ids])
+  ),
+  file.path(tables_dir, "vst_gene_variance_ranking.csv")
+)
+
+knitr::kable(
+  expression_qc,
+  caption = "Expression input and sensitivity-design summary."
+)
+```
+
+# 3. Reconstruct the networks
+
+Each network uses the same signed biweight-midcorrelation design. The
+soft-thresholding power is selected independently using the current Step 02 rule:
+the lowest tested power reaching the target is retained; when the target is not
+reached, the power with the highest available fit is used. Diagnostics at power
+12 are also retained so that the effect of adding genes can be compared at a
+common power.
+
+```{r reconstruct-networks, message=TRUE}
+network_results <- purrr::map(
+  gene_set_sizes,
+  load_or_run_network_for_gene_set,
+  ranked_gene_ids = ranked_gene_ids,
+  expression_matrix = expression_matrix,
+  metadata_aligned = metadata_aligned,
+  input_signature = network_input_signature
+)
+names(network_results) <- vapply(
+  network_results,
+  function(current_result) current_result$network_label,
+  character(1)
+)
+
+network_summary <- purrr::map_dfr(
+  network_results,
+  "summary"
+) %>%
+  dplyr::arrange(.data$requested_gene_n)
+
+soft_threshold_all <- purrr::map_dfr(
+  network_results,
+  "soft"
+)
+module_summary_all <- purrr::map_dfr(
+  network_results,
+  "modules"
+)
+module_assignment_all <- purrr::map_dfr(
+  network_results,
+  "assignment"
+)
+planned_contrasts_all <- purrr::map_dfr(
+  network_results,
+  "contrasts"
+)
+
+write_csv_safe(
+  network_summary,
+  file.path(tables_dir, "network_size_diagnostic_summary.csv")
+)
+write_csv_safe(
+  soft_threshold_all,
+  file.path(tables_dir, "soft_threshold_diagnostics_all_gene_sets.csv")
+)
+write_csv_safe(
+  module_summary_all,
+  file.path(tables_dir, "module_summary_all_gene_sets.csv")
+)
+write_csv_safe(
+  planned_contrasts_all,
+  file.path(tables_dir, "planned_module_contrasts_all_gene_sets.csv")
+)
+
+knitr::kable(
+  network_summary,
+  digits = 4,
+  caption = "WGCNA diagnostics across the tested gene-set sizes."
+)
+```
+
+# 4. Soft-threshold and connectivity diagnostics
+
+```{r soft-threshold-comparison, fig.width=11, fig.height=7.5}
+soft_threshold_plot_tbl <- soft_threshold_all %>%
+  dplyr::select(
+    .data$network_label,
+    .data$requested_gene_n,
+    .data$power,
+    .data$scale_free_fit,
+    .data$mean_connectivity
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      .data$scale_free_fit,
+      .data$mean_connectivity
+    ),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      scale_free_fit = "Scale-free topology fit",
+      mean_connectivity = "Mean connectivity"
+    ),
+    gene_set = paste0(
+      format(.data$requested_gene_n, big.mark = ","),
+      " genes"
+    )
+  )
+
+soft_threshold_plot <- ggplot2::ggplot(
+  soft_threshold_plot_tbl,
+  ggplot2::aes(
+    x = .data$power,
+    y = .data$value,
+    group = .data$gene_set,
+    linetype = .data$gene_set,
+    shape = .data$gene_set
+  )
+) +
+  ggplot2::geom_line(linewidth = 0.7) +
+  ggplot2::geom_point(size = 2.1) +
+  ggplot2::facet_wrap(
+    ~metric,
+    scales = "free_y",
+    ncol = 1
+  ) +
+  ggplot2::labs(
+    title = "Soft-threshold diagnostics across WGCNA gene-set sizes",
+    subtitle = paste(
+      "Power is re-evaluated for each network;",
+      "the target fit is 0.80"
+    ),
+    x = "Soft-thresholding power",
+    y = "Diagnostic value",
+    linetype = "Gene set",
+    shape = "Gene set"
+  ) +
+  theme_publication()
+
+save_plot_bundle(
+  soft_threshold_plot,
+  file.path(plots_dir, "soft_threshold_gene_set_comparison"),
+  width = 11,
+  height = 7.5
+)
+
+soft_threshold_plot
+```
+
+```{r common-power-comparison}
+common_power_summary <- soft_threshold_all %>%
+  dplyr::filter(
+    .data$power == reference_power_for_comparison
+  ) %>%
+  dplyr::select(
+    .data$network_label,
+    .data$requested_gene_n,
+    .data$power,
+    .data$scale_free_fit,
+    .data$slope,
+    .data$mean_connectivity,
+    .data$median_connectivity,
+    .data$max_connectivity
+  ) %>%
+  dplyr::arrange(.data$requested_gene_n)
+
+write_csv_safe(
+  common_power_summary,
+  file.path(
+    tables_dir,
+    paste0(
+      "common_power_",
+      reference_power_for_comparison,
+      "_diagnostics.csv"
+    )
+  )
+)
+
+knitr::kable(
+  common_power_summary,
+  digits = 4,
+  caption = paste(
+    "Network diagnostics at the common soft-thresholding power",
+    reference_power_for_comparison,
+    "."
+  )
+)
+```
+
+```{r network-summary-plot, fig.width=12, fig.height=6.5}
+network_metric_plot_tbl <- network_summary %>%
+  dplyr::select(
+    .data$network_label,
+    .data$requested_gene_n,
+    .data$selected_scale_free_fit,
+    .data$selected_mean_connectivity,
+    .data$assigned_gene_fraction,
+    .data$n_assigned_modules,
+    .data$grey_gene_fraction
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -c(
+      .data$network_label,
+      .data$requested_gene_n
+    ),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      .data$metric,
+      selected_scale_free_fit = "Selected-power scale-free fit",
+      selected_mean_connectivity = "Selected-power mean connectivity",
+      assigned_gene_fraction = "Assigned gene fraction",
+      n_assigned_modules = "Assigned modules",
+      grey_gene_fraction = "Grey gene fraction"
+    ),
+    gene_set = factor(
+      paste0(
+        format(.data$requested_gene_n, big.mark = ","),
+        " genes"
+      ),
+      levels = paste0(
+        format(sort(unique(.data$requested_gene_n)), big.mark = ","),
+        " genes"
+      )
+    )
+  )
+
+network_metric_plot <- ggplot2::ggplot(
+  network_metric_plot_tbl,
+  ggplot2::aes(
+    x = .data$gene_set,
+    y = .data$value,
+    group = 1
+  )
+) +
+  ggplot2::geom_line(linewidth = 0.7) +
+  ggplot2::geom_point(size = 2.8) +
+  ggplot2::facet_wrap(
+    ~metric,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  ggplot2::labs(
+    title = "Network structure across WGCNA gene-set sizes",
+    x = NULL,
+    y = "Value"
+  ) +
+  theme_publication(base_size = 10) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 25, hjust = 1)
+  )
+
+save_plot_bundle(
+  network_metric_plot,
+  file.path(plots_dir, "network_metric_gene_set_comparison"),
+  width = 12,
+  height = 6.5
+)
+
+network_metric_plot
+```
+
+# 5. Preservation of modules across nested gene sets
+
+Reference modules are matched to modules in the larger network after restricting
+both assignments to their shared genes. Jaccard similarity measures overlap in
+gene membership. Eigengene-profile correlation measures whether the matched
+modules retain the same dominant expression pattern across the 30 libraries;
+its absolute value is reported because eigengene signs are arbitrary. The
+high/moderate/low classes are transparent heuristics for screening and are not
+formal WGCNA preservation statistics.
+
+```{r module-preservation-across-sizes}
+network_pairs <- tibble::tribble(
+  ~reference_size, ~test_size,
+  5000L, 10000L,
+  5000L, 15000L,
+  10000L, 15000L
+) %>%
+  dplyr::filter(
+    .data$reference_size %in% gene_set_sizes,
+    .data$test_size %in% gene_set_sizes
+  )
+
+module_preservation <- purrr::pmap_dfr(
+  network_pairs,
+  function(reference_size, test_size) {
+    reference_result <- network_results[[
+      paste0("G", reference_size)
+    ]]
+    test_result <- network_results[[
+      paste0("G", test_size)
+    ]]
+
+    compare_network_pair(
+      reference_result,
+      test_result
+    )
+  }
+)
+
+preservation_summary <- module_preservation %>%
+  dplyr::group_by(
+    .data$reference_network,
+    .data$test_network,
+    .data$reference_size,
+    .data$test_size
+  ) %>%
+  dplyr::summarise(
+    n_reference_modules = dplyr::n(),
+    median_jaccard = stats::median(
+      .data$jaccard,
+      na.rm = TRUE
+    ),
+    minimum_jaccard = min(
+      .data$jaccard,
+      na.rm = TRUE
+    ),
+    median_reference_recovery = stats::median(
+      .data$reference_recovery_fraction,
+      na.rm = TRUE
+    ),
+    median_abs_eigengene_cor = stats::median(
+      .data$eigengene_profile_abs_cor,
+      na.rm = TRUE
+    ),
+    n_high_preservation = sum(
+      .data$preservation_class == "high",
+      na.rm = TRUE
+    ),
+    n_moderate_preservation = sum(
+      .data$preservation_class == "moderate",
+      na.rm = TRUE
+    ),
+    n_low_preservation = sum(
+      .data$preservation_class == "low",
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+write_csv_safe(
+  module_preservation,
+  file.path(tables_dir, "module_preservation_across_gene_sets.csv")
+)
+write_csv_safe(
+  preservation_summary,
+  file.path(tables_dir, "module_preservation_summary.csv")
+)
+
+knitr::kable(
+  preservation_summary,
+  digits = 4,
+  caption = "Module preservation across nested WGCNA gene sets."
+)
+
+knitr::kable(
+  module_preservation %>%
+    dplyr::arrange(
+      .data$reference_size,
+      .data$test_size,
+      dplyr::desc(.data$jaccard)
+    ),
+  digits = 4,
+  caption = "Best module matches based on shared-gene Jaccard similarity."
+)
+```
+
+```{r module-preservation-plot, fig.width=11, fig.height=7}
+preservation_plot_tbl <- module_preservation %>%
+  dplyr::mutate(
+    comparison = paste0(
+      format(.data$reference_size, big.mark = ","),
+      " -> ",
+      format(.data$test_size, big.mark = ",")
+    )
+  )
+
+module_preservation_plot <- ggplot2::ggplot(
+  preservation_plot_tbl,
+  ggplot2::aes(
+    x = .data$jaccard,
+    y = .data$eigengene_profile_abs_cor,
+    shape = .data$preservation_class
+  )
+) +
+  ggplot2::geom_vline(
+    xintercept = c(0.40, 0.60),
+    linetype = "dashed",
+    linewidth = 0.4
+  ) +
+  ggplot2::geom_hline(
+    yintercept = c(0.60, 0.75),
+    linetype = "dashed",
+    linewidth = 0.4
+  ) +
+  ggplot2::geom_point(size = 2.8, alpha = 0.85) +
+  ggplot2::facet_wrap(~comparison) +
+  ggplot2::labs(
+    title = "Preservation of module membership and eigengene profiles",
+    subtitle = paste(
+      "Each point is one reference module matched to its best module",
+      "in the larger gene set"
+    ),
+    x = "Shared-gene Jaccard similarity",
+    y = "Absolute eigengene-profile correlation",
+    shape = "Heuristic class"
+  ) +
+  theme_publication()
+
+save_plot_bundle(
+  module_preservation_plot,
+  file.path(plots_dir, "module_preservation_gene_set_comparison"),
+  width = 11,
+  height = 7
+)
+
+module_preservation_plot
+```
+
+# 6. Preservation of planned site-contrast signals
+
+The three planned contrasts are fitted separately within each reconstructed
+network using the individual-library module eigengenes. Benjamini-Hochberg
+correction is applied across all module-by-contrast tests within each network.
+Because module labels and eigengene signs are arbitrary across networks, direct
+cross-network effect comparisons are made only for the best-matched modules and
+the test-network effect is aligned to the sign of the eigengene-profile
+correlation.
+
+```{r contrast-preservation}
+contrast_preservation <- module_preservation %>%
+  dplyr::filter(!is.na(.data$test_module_label)) %>%
+  dplyr::select(
+    .data$reference_network,
+    .data$test_network,
+    .data$reference_size,
+    .data$test_size,
+    .data$reference_module_label,
+    .data$test_module_label,
+    .data$jaccard,
+    .data$eigengene_profile_cor,
+    .data$eigengene_profile_abs_cor,
+    .data$preservation_class
+  ) %>%
+  dplyr::left_join(
+    planned_contrasts_all %>%
+      dplyr::select(
+        reference_network = .data$network_label,
+        reference_module_label = .data$module_label,
+        .data$contrast,
+        .data$contrast_panel,
+        reference_hedges_g = .data$hedges_g,
+        reference_p = .data$p_value,
+        reference_q = .data$q_global_network,
+        reference_fdr_supported = .data$fdr_supported,
+        reference_large_nominal = .data$large_nominal_effect
+      ),
+    by = c(
+      "reference_network",
+      "reference_module_label"
+    )
+  ) %>%
+  dplyr::left_join(
+    planned_contrasts_all %>%
+      dplyr::select(
+        test_network = .data$network_label,
+        test_module_label = .data$module_label,
+        .data$contrast,
+        test_hedges_g = .data$hedges_g,
+        test_p = .data$p_value,
+        test_q = .data$q_global_network,
+        test_fdr_supported = .data$fdr_supported,
+        test_large_nominal = .data$large_nominal_effect
+      ),
+    by = c(
+      "test_network",
+      "test_module_label",
+      "contrast"
+    )
+  ) %>%
+  dplyr::mutate(
+    alignment_sign = dplyr::if_else(
+      is.finite(.data$eigengene_profile_cor) &
+        .data$eigengene_profile_cor < 0,
+      -1,
+      1
+    ),
+    test_hedges_g_aligned =
+      .data$test_hedges_g * .data$alignment_sign,
+    aligned_effect_difference =
+      .data$test_hedges_g_aligned - .data$reference_hedges_g,
+    same_aligned_direction = dplyr::case_when(
+      !is.finite(.data$reference_hedges_g) |
+        !is.finite(.data$test_hedges_g_aligned) ~ NA,
+      .data$reference_hedges_g == 0 |
+        .data$test_hedges_g_aligned == 0 ~ NA,
+      TRUE ~ sign(.data$reference_hedges_g) ==
+        sign(.data$test_hedges_g_aligned)
+    )
+  )
+
+contrast_network_summary <- planned_contrasts_all %>%
+  dplyr::group_by(
+    .data$network_label,
+    .data$network_size,
+    .data$contrast,
+    .data$contrast_panel
+  ) %>%
+  dplyr::summarise(
+    n_tested_modules = dplyr::n(),
+    n_fdr_supported = sum(
+      .data$fdr_supported,
+      na.rm = TRUE
+    ),
+    n_large_nominal = sum(
+      .data$large_nominal_effect,
+      na.rm = TRUE
+    ),
+    maximum_abs_hedges_g = max(
+      abs(.data$hedges_g),
+      na.rm = TRUE
+    ),
+    minimum_global_q = min(
+      .data$q_global_network,
+      na.rm = TRUE
+    ),
+    leading_module = .data$module_label[
+      which.max(abs(.data$hedges_g))
+    ][[1]],
+    .groups = "drop"
+  )
+
+write_csv_safe(
+  contrast_preservation,
+  file.path(tables_dir, "planned_contrast_preservation_across_gene_sets.csv")
+)
+write_csv_safe(
+  contrast_network_summary,
+  file.path(tables_dir, "planned_contrast_summary_by_gene_set.csv")
+)
+
+knitr::kable(
+  contrast_network_summary,
+  digits = 4,
+  caption = "Planned module-contrast evidence across gene-set sizes."
+)
+```
+
+```{r planned-contrast-heatmap, fig.width=13, fig.height=10}
+contrast_heatmap_tbl <- planned_contrasts_all %>%
+  dplyr::mutate(
+    gene_set = factor(
+      paste0(
+        format(.data$network_size, big.mark = ","),
+        " genes"
+      ),
+      levels = paste0(
+        format(sort(unique(.data$network_size)), big.mark = ","),
+        " genes"
+      )
+    ),
+    module_label = factor(
+      .data$module_label,
+      levels = rev(unique(.data$module_label))
+    ),
+    cell_label = dplyr::case_when(
+      .data$q_global_network < 0.05 ~
+        paste0("g=", sprintf("%.2f", .data$hedges_g), "\nq<0.05"),
+      .data$p_value < 0.05 ~
+        paste0("g=", sprintf("%.2f", .data$hedges_g), "\np<0.05"),
+      TRUE ~ paste0("g=", sprintf("%.2f", .data$hedges_g))
+    )
+  )
+
+planned_contrast_heatmap <- ggplot2::ggplot(
+  contrast_heatmap_tbl,
+  ggplot2::aes(
+    x = .data$contrast_panel,
+    y = .data$module_label,
+    fill = .data$hedges_g
+  )
+) +
+  ggplot2::geom_tile(color = "white", linewidth = 0.35) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = .data$cell_label),
+    size = 2.5
+  ) +
+  ggplot2::scale_fill_gradient2(
+    low = "#2c7bb6",
+    mid = "white",
+    high = "#d7191c",
+    midpoint = 0,
+    name = "Hedges g"
+  ) +
+  ggplot2::facet_wrap(
+    ~gene_set,
+    scales = "free_y",
+    ncol = 1
+  ) +
+  ggplot2::labs(
+    title = "Planned module-eigengene contrasts across gene-set sizes",
+    subtitle = paste(
+      "Module labels are network-specific; compare matched modules using",
+      "the preservation tables"
+    ),
+    x = NULL,
+    y = "Network-specific module"
+  ) +
+  theme_publication(base_size = 9) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 20, hjust = 1)
+  )
+
+save_plot_bundle(
+  planned_contrast_heatmap,
+  file.path(plots_dir, "planned_contrast_heatmap_all_gene_sets"),
+  width = 13,
+  height = 10
+)
+
+planned_contrast_heatmap
+```
+
+# 7. DEG and annotation coverage
+
+Increasing the gene set can improve biological coverage even when the
+scale-free-topology fit does not improve. This section records how many focal
+DEGs, annotated genes, and GO-mapped genes are eligible for the network and how
+many are retained in assigned modules. These diagnostics do not use DEG status
+or annotation to construct the network.
+
+```{r load-deg-and-annotation-coverage}
+focal_deg_objects <- purrr::pmap(
+  deg_source_tbl,
+  function(contrast, numerator_site, denominator_site, path) {
+    if (!file.exists(path)) {
+      stop("Required DEG file is missing for ", contrast, ": ", path)
+    }
+    raw_tbl <- readr::read_csv(path, show_col_types = FALSE)
+    required_columns <- c(
+      "gene_id", "contrast", "numerator", "denominator", "padj",
+      "log2FoldChange_shrunk"
+    )
+    missing_columns <- setdiff(required_columns, names(raw_tbl))
+    if (length(missing_columns) > 0L) {
+      stop(
+        "DEG file for ", contrast, " is missing: ",
+        paste(missing_columns, collapse = ", ")
+      )
+    }
+    observed_contrasts <- unique(as.character(raw_tbl$contrast))
+    observed_numerators <- unique(as.character(raw_tbl$numerator))
+    observed_denominators <- unique(as.character(raw_tbl$denominator))
+    if (!identical(observed_contrasts, contrast) ||
+        !identical(observed_numerators, numerator_site) ||
+        !identical(observed_denominators, denominator_site)) {
+      stop(
+        "DEG direction audit failed for ", contrast,
+        ". Expected ", numerator_site, " versus ", denominator_site, "."
+      )
+    }
+
+    filtered_tbl <- raw_tbl %>%
+      dplyr::filter(
+        is.finite(.data$padj),
+        .data$padj < 0.05,
+        is.finite(.data$log2FoldChange_shrunk),
+        abs(.data$log2FoldChange_shrunk) >= 1
+      ) %>%
+      dplyr::transmute(
+        gene_id = as.character(.data$gene_id),
+        contrast = as.character(.data$contrast),
+        numerator = as.character(.data$numerator),
+        denominator = as.character(.data$denominator),
+        padj = as.numeric(.data$padj),
+        log2FoldChange_shrunk = as.numeric(.data$log2FoldChange_shrunk),
+        direction = dplyr::if_else(
+          .data$log2FoldChange_shrunk > 0,
+          "higher_in_numerator",
+          "lower_in_numerator"
+        ),
+        source_file = normalizePath(path, winslash = "/", mustWork = TRUE)
+      ) %>%
+      dplyr::distinct(.data$gene_id, .keep_all = TRUE)
+
+    list(
+      genes = filtered_tbl,
+      audit = tibble::tibble(
+        contrast = contrast,
+        numerator = numerator_site,
+        denominator = denominator_site,
+        source_file = normalizePath(path, winslash = "/", mustWork = TRUE),
+        input_row_n = nrow(raw_tbl),
+        padj_lt_0_05_n = sum(
+          is.finite(raw_tbl$padj) & raw_tbl$padj < 0.05,
+          na.rm = TRUE
+        ),
+        abs_shrunken_log2fc_ge_1_n = sum(
+          is.finite(raw_tbl$log2FoldChange_shrunk) &
+            abs(raw_tbl$log2FoldChange_shrunk) >= 1,
+          na.rm = TRUE
+        ),
+        final_deg_n = nrow(filtered_tbl),
+        criteria = "padj < 0.05 and abs(log2FoldChange_shrunk) >= 1"
+      )
+    )
+  }
+)
+
+focal_deg_tbl <- purrr::map_dfr(focal_deg_objects, "genes")
+deg_input_audit <- purrr::map_dfr(focal_deg_objects, "audit")
+
+missing_contrasts <- setdiff(
+  planned_contrasts$contrast,
+  unique(focal_deg_tbl$contrast)
+)
+if (length(missing_contrasts) > 0L) {
+  stop("No qualifying DEGs were loaded for: ", paste(missing_contrasts, collapse = ", "))
+}
+if (deg_input_audit$final_deg_n[
+      deg_input_audit$contrast == "HOL05_vs_HOL04"
+    ] == 0L) {
+  stop("H6-H5 DEG loading returned zero genes after the declared filters.")
+}
+
+write_csv_safe(
+  deg_input_audit,
+  file.path(tables_dir, "focal_deg_input_audit.csv")
+)
+
+annotation_gene_tbl <- tibble::tibble(
+  gene_id = character(),
+  has_readable_annotation = logical()
+)
+
+if (file.exists(annotation_file)) {
+  raw_annotation_tbl <- readr::read_csv(
+    annotation_file,
+    show_col_types = FALSE
+  )
+
+  if ("gene_id" %in% names(raw_annotation_tbl)) {
+    candidate_annotation_columns <- intersect(
+      c(
+        "best_gene_label",
+        "gene_label",
+        "EggNM.Preferred_name",
+        "EggNM.Description",
+        "consensus_gene_symbol",
+        "annotation"
+      ),
+      names(raw_annotation_tbl)
+    )
+
+    if (length(candidate_annotation_columns) > 0L) {
+      annotation_values <- dplyr::select(
+        raw_annotation_tbl,
+        dplyr::all_of(candidate_annotation_columns)
+      )
+      annotation_gene_ids <- as.character(raw_annotation_tbl$gene_id)
+      has_readable_annotation <- vapply(
+        seq_len(nrow(raw_annotation_tbl)),
+        function(row_index) {
+          current_values <- safe_chr(
+            unlist(annotation_values[row_index, ], use.names = FALSE)
+          )
+          current_values <- current_values[
+            !is.na(current_values) &
+              !current_values %in% c("NA", ".", "-") &
+              current_values != annotation_gene_ids[[row_index]] &
+              !stringr::str_detect(current_values, "^TRINITY_")
+          ]
+          length(current_values) > 0L
+        },
+        logical(1)
+      )
+
+      annotation_gene_tbl <- tibble::tibble(
+        gene_id = annotation_gene_ids,
+        has_readable_annotation = has_readable_annotation
+      ) %>%
+        dplyr::group_by(.data$gene_id) %>%
+        dplyr::summarise(
+          has_readable_annotation = any(
+            .data$has_readable_annotation,
+            na.rm = TRUE
+          ),
+          .groups = "drop"
+        )
+    }
+  }
+}
+
+go_gene_ids <- character()
+if (file.exists(gene_to_go_file)) {
+  gene_to_go_tbl <- readr::read_csv(
+    gene_to_go_file,
+    show_col_types = FALSE
+  )
+  if ("gene_id" %in% names(gene_to_go_tbl)) {
+    go_gene_ids <- unique(as.character(gene_to_go_tbl$gene_id))
+  }
+}
+
+network_gene_coverage <- purrr::map_dfr(
+  network_results,
+  function(current_result) {
+    current_assignment <- current_result$assignment
+    eligible_gene_ids <- unique(current_assignment$gene_id)
+    assigned_gene_ids <- unique(
+      current_assignment$gene_id[
+        current_assignment$module != "grey"
+      ]
+    )
+
+    annotated_gene_ids <- annotation_gene_tbl$gene_id[
+      annotation_gene_tbl$has_readable_annotation
+    ]
+
+    tibble::tibble(
+      network_label = current_result$network_label,
+      network_size = current_result$network_size,
+      eligible_gene_n = length(eligible_gene_ids),
+      assigned_gene_n = length(assigned_gene_ids),
+      readable_annotation_eligible_n = length(intersect(
+        eligible_gene_ids,
+        annotated_gene_ids
+      )),
+      readable_annotation_assigned_n = length(intersect(
+        assigned_gene_ids,
+        annotated_gene_ids
+      )),
+      go_mapped_eligible_n = length(intersect(
+        eligible_gene_ids,
+        go_gene_ids
+      )),
+      go_mapped_assigned_n = length(intersect(
+        assigned_gene_ids,
+        go_gene_ids
+      ))
+    ) %>%
+      dplyr::mutate(
+        readable_annotation_eligible_fraction = safe_divide(
+          .data$readable_annotation_eligible_n,
+          .data$eligible_gene_n
+        ),
+        readable_annotation_assigned_fraction = safe_divide(
+          .data$readable_annotation_assigned_n,
+          .data$assigned_gene_n
+        ),
+        go_mapped_eligible_fraction = safe_divide(
+          .data$go_mapped_eligible_n,
+          .data$eligible_gene_n
+        ),
+        go_mapped_assigned_fraction = safe_divide(
+          .data$go_mapped_assigned_n,
+          .data$assigned_gene_n
+        )
+      )
+  }
+)
+
+deg_coverage <- purrr::map_dfr(
+  network_results,
+  function(current_result) {
+    current_assignment <- current_result$assignment
+    eligible_gene_ids <- unique(current_assignment$gene_id)
+    assigned_gene_ids <- unique(
+      current_assignment$gene_id[
+        current_assignment$module != "grey"
+      ]
+    )
+
+    planned_contrasts %>%
+      dplyr::select(
+        .data$contrast,
+        .data$contrast_panel
+      ) %>%
+      dplyr::mutate(
+        network_label = current_result$network_label,
+        network_size = current_result$network_size,
+        total_significant_deg_n = purrr::map_int(
+          .data$contrast,
+          function(current_contrast) {
+            dplyr::n_distinct(
+              focal_deg_tbl$gene_id[
+                focal_deg_tbl$contrast == current_contrast
+              ]
+            )
+          }
+        ),
+        eligible_significant_deg_n = purrr::map_int(
+          .data$contrast,
+          function(current_contrast) {
+            current_degs <- focal_deg_tbl$gene_id[
+              focal_deg_tbl$contrast == current_contrast
+            ]
+            length(intersect(current_degs, eligible_gene_ids))
+          }
+        ),
+        assigned_significant_deg_n = purrr::map_int(
+          .data$contrast,
+          function(current_contrast) {
+            current_degs <- focal_deg_tbl$gene_id[
+              focal_deg_tbl$contrast == current_contrast
+            ]
+            length(intersect(current_degs, assigned_gene_ids))
+          }
+        )
+      ) %>%
+      dplyr::mutate(
+        eligible_deg_fraction = safe_divide(
+          .data$eligible_significant_deg_n,
+          .data$total_significant_deg_n
+        ),
+        assigned_deg_fraction_of_total = safe_divide(
+          .data$assigned_significant_deg_n,
+          .data$total_significant_deg_n
+        ),
+        assigned_deg_fraction_of_eligible = safe_divide(
+          .data$assigned_significant_deg_n,
+          .data$eligible_significant_deg_n
+        )
+      )
+  }
+)
+
+write_csv_safe(
+  network_gene_coverage,
+  file.path(tables_dir, "annotation_and_go_coverage_by_gene_set.csv")
+)
+write_csv_safe(
+  deg_coverage,
+  file.path(tables_dir, "focal_deg_coverage_by_gene_set.csv")
+)
+
+knitr::kable(
+  network_gene_coverage,
+  digits = 4,
+  caption = "Readable annotation and GO-mapping coverage across gene sets."
+)
+
+if (nrow(focal_deg_tbl) > 0L) {
+  knitr::kable(
+    deg_coverage,
+    digits = 4,
+    caption = "Coverage of significant genes from the three focal contrasts."
+  )
+} else {
+  cat(
+    "The aggregate focal DEG table was not available; DEG coverage was not evaluated."
+  )
+}
+```
+
+```{r deg-coverage-plot, fig.width=11, fig.height=6}
+if (nrow(focal_deg_tbl) > 0L) {
+  deg_coverage_plot_tbl <- deg_coverage %>%
+    dplyr::select(
+      .data$network_size,
+      .data$contrast_panel,
+      .data$eligible_deg_fraction,
+      .data$assigned_deg_fraction_of_total
+    ) %>%
+    tidyr::pivot_longer(
+      cols = c(
+        .data$eligible_deg_fraction,
+        .data$assigned_deg_fraction_of_total
+      ),
+      names_to = "coverage_type",
+      values_to = "fraction"
+    ) %>%
+    dplyr::mutate(
+      coverage_type = dplyr::recode(
+        .data$coverage_type,
+        eligible_deg_fraction = "Eligible for network",
+        assigned_deg_fraction_of_total = "Assigned to a module"
+      ),
+      gene_set = factor(
+        paste0(
+          format(.data$network_size, big.mark = ","),
+          " genes"
+        ),
+        levels = paste0(
+          format(sort(unique(.data$network_size)), big.mark = ","),
+          " genes"
+        )
+      )
+    )
+
+  deg_coverage_plot <- ggplot2::ggplot(
+    deg_coverage_plot_tbl,
+    ggplot2::aes(
+      x = .data$gene_set,
+      y = .data$fraction,
+      group = .data$coverage_type,
+      linetype = .data$coverage_type,
+      shape = .data$coverage_type
+    )
+  ) +
+    ggplot2::geom_line(linewidth = 0.7) +
+    ggplot2::geom_point(size = 2.6) +
+    ggplot2::facet_wrap(~contrast_panel) +
+    ggplot2::scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1)
+    ) +
+    ggplot2::labs(
+      title = "Recovery of focal DEGs across WGCNA gene-set sizes",
+      x = NULL,
+      y = "Fraction of significant DEGs",
+      linetype = "Coverage",
+      shape = "Coverage"
+    ) +
+    theme_publication(base_size = 10) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 25, hjust = 1)
+    )
+
+  save_plot_bundle(
+    deg_coverage_plot,
+    file.path(plots_dir, "focal_deg_coverage_gene_set_comparison"),
+    width = 11,
+    height = 6
+  )
+
+  deg_coverage_plot
+}
+```
+
+# 8. Structural power sensitivity for the 10,000-gene candidate
+
+The 10,000-gene candidate is reconstructed at powers 12, 14, 16, 18, and 20
+with every other network setting fixed. Selection uses connectivity, module
+assignment, adjacent-power preservation, and site-stratified resampling only.
+Site contrasts, DEG overlap, enrichment yield, and chemistry are not available
+to the power-selection rule.
+
+```{r ten-thousand-power-sensitivity, message=TRUE}
+g10000_gene_ids <- utils::head(ranked_gene_ids, 10000L)
+dat_expr_g10000 <- t(
+  expression_matrix[g10000_gene_ids, , drop = FALSE]
+)
+rownames(dat_expr_g10000) <- metadata_aligned$sample_code
+
+g10000_soft_tbl <- network_results$G10000$soft %>%
+  dplyr::filter(.data$power %in% power_sensitivity_candidates)
+
+connectivity_cache_signature <- paste(
+  network_input_signature,
+  paste0("gene_hash=", digest::digest(g10000_gene_ids, algo = "xxhash64")),
+  paste0("powers=", paste(power_sensitivity_candidates, collapse = ";")),
+  paste0("network_type=", network_type),
+  paste0("correlation_type=", correlation_type),
+  paste0("max_p_outliers=", max_p_outliers),
+  paste0("very_low_threshold=", very_low_connectivity_threshold),
+  sep = "||"
+)
+connectivity_cache_file <- file.path(
+  objects_dir,
+  paste0(
+    "power_connectivity_distribution_",
+    digest::digest(connectivity_cache_signature, algo = "xxhash64"),
+    ".rds"
+  )
+)
+if (reuse_power_sensitivity_cache && file.exists(connectivity_cache_file)) {
+  cached_connectivity <- readRDS(connectivity_cache_file)
+  if (is.list(cached_connectivity) &&
+      identical(cached_connectivity$signature, connectivity_cache_signature)) {
+    power_connectivity_distribution <- cached_connectivity$result
+  }
+}
+if (!exists("power_connectivity_distribution", inherits = FALSE)) {
+  power_connectivity_distribution <- purrr::map_dfr(
+    power_sensitivity_candidates,
+    function(current_power) {
+      message("Calculating connectivity distribution at power ", current_power)
+      connectivity <- WGCNA::softConnectivity(
+        dat_expr_g10000,
+        corFnc = correlation_type,
+        corOptions = paste0(
+          "use = 'p', maxPOutliers = ", max_p_outliers
+        ),
+        type = network_type,
+        power = current_power,
+        blockSize = 1000,
+        verbose = 0
+      )
+      tibble::tibble(
+        power = current_power,
+        connectivity_p10 = unname(stats::quantile(
+          connectivity, 0.10, na.rm = TRUE
+        )),
+        connectivity_p90 = unname(stats::quantile(
+          connectivity, 0.90, na.rm = TRUE
+        )),
+        proportion_very_low_connectivity = mean(
+          connectivity < very_low_connectivity_threshold,
+          na.rm = TRUE
+        ),
+        very_low_connectivity_threshold = very_low_connectivity_threshold
+      )
+    }
+  )
+  saveRDS(
+    list(
+      signature = connectivity_cache_signature,
+      result = power_connectivity_distribution
+    ),
+    connectivity_cache_file,
+    compress = FALSE
+  )
+}
+
+power_cache_signature_base <- paste(
+  network_input_signature,
+  paste0(
+    "gene_hash=",
+    digest::digest(g10000_gene_ids, algo = "xxhash64")
+  ),
+  paste0("WGCNA=", as.character(utils::packageVersion("WGCNA"))),
+  paste0("seed=", power_sensitivity_seed),
+  paste0("network_type=", network_type),
+  paste0("correlation_type=", correlation_type),
+  paste0("max_p_outliers=", max_p_outliers),
+  paste0("minimum_module_size=", minimum_module_size),
+  paste0("merge_cut_height=", merge_cut_height),
+  paste0("deep_split=", deep_split),
+  paste0("pam_respects_dendro=", pam_respects_dendro),
+  paste0("max_block_size=", max_block_size),
+  "undersized_module_policy=reclassify_to_exact_grey_v1",
+  "eigengene_orientation=positive_average_standardized_expression_v1",
+  sep = "||"
+)
+
+power_network_cache_dir <- file.path(
+  objects_dir, "power_sensitivity_network_cache"
+)
+power_resample_cache_dir <- file.path(
+  objects_dir, "power_sensitivity_resample_cache"
+)
+dir.create(power_network_cache_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(power_resample_cache_dir, recursive = TRUE, showWarnings = FALSE)
+
+load_or_run_power_network <- function(current_power) {
+  current_signature <- paste(
+    power_cache_signature_base,
+    paste0("power=", current_power),
+    sep = "||"
+  )
+  cache_file <- file.path(
+    power_network_cache_dir,
+    paste0(
+      "G10000_power_", current_power, "_",
+      digest::digest(current_signature, algo = "xxhash64"),
+      ".rds"
+    )
+  )
+  if (reuse_power_sensitivity_cache && file.exists(cache_file)) {
+    cached <- readRDS(cache_file)
+    if (is.list(cached) &&
+        identical(cached$signature, current_signature)) {
+      message("Reusing 10,000-gene power cache: ", current_power)
+      return(cached$result)
+    }
+  }
+  set.seed(power_sensitivity_seed + current_power)
+  result <- wgcna_run_validated_network(
+    dat_expr = dat_expr_g10000,
+    power = current_power,
+    network_type = network_type,
+    correlation_type = correlation_type,
+    max_p_outliers = max_p_outliers,
+    minimum_module_size = minimum_module_size,
+    merge_cut_height = merge_cut_height,
+    deep_split = deep_split,
+    pam_respects_dendro = pam_respects_dendro,
+    max_block_size = max_block_size,
+    verbose = 0
+  )
+  saveRDS(
+    list(signature = current_signature, result = result),
+    cache_file,
+    compress = FALSE
+  )
+  result
+}
+
+power_network_results <- purrr::map(
+  power_sensitivity_candidates,
+  load_or_run_power_network
+)
+names(power_network_results) <- paste0("P", power_sensitivity_candidates)
+
+power_module_audit <- purrr::imap_dfr(
+  power_network_results,
+  function(current_result, current_label) {
+    current_result$module_audit %>%
+      dplyr::mutate(
+        power = as.integer(stringr::str_remove(current_label, "^P")),
+        .before = 1
+      )
+  }
+)
+power_anomalous_gene_audit <- purrr::imap_dfr(
+  power_network_results,
+  function(current_result, current_label) {
+    current_result$anomalous_gene_audit %>%
+      dplyr::mutate(
+        power = as.integer(stringr::str_remove(current_label, "^P")),
+        .before = 1
+      )
+  }
+)
+power_eigengene_orientation <- purrr::imap_dfr(
+  power_network_results,
+  function(current_result, current_label) {
+    current_result$orientation %>%
+      dplyr::mutate(
+        power = as.integer(stringr::str_remove(current_label, "^P")),
+        .before = 1
+      )
+  }
+)
+
+power_network_structure <- purrr::imap_dfr(
+  power_network_results,
+  function(current_result, current_label) {
+    current_power <- as.integer(stringr::str_remove(current_label, "^P"))
+    assigned_sizes <- current_result$module_summary$n_genes[
+      current_result$module_summary$module != "grey"
+    ]
+    grey_n <- sum(current_result$module_summary$n_genes[
+      current_result$module_summary$module == "grey"
+    ])
+    tibble::tibble(
+      power = current_power,
+      assigned_gene_fraction = (10000L - grey_n) / 10000L,
+      grey_fraction = grey_n / 10000L,
+      module_n = length(assigned_sizes),
+      minimum_module_size_observed = min(assigned_sizes),
+      median_module_size = stats::median(assigned_sizes),
+      maximum_module_size = max(assigned_sizes),
+      n_blocks = current_result$n_blocks,
+      raw_undersized_module_n = sum(
+        current_result$module_audit$below_declared_minimum
+      )
+    )
+  }
+)
+
+adjacent_power_pairs <- tibble::tibble(
+  reference_power = power_sensitivity_candidates[-length(power_sensitivity_candidates)],
+  alternative_power = power_sensitivity_candidates[-1]
+)
+power_adjacent_preservation <- purrr::pmap_dfr(
+  adjacent_power_pairs,
+  function(reference_power, alternative_power) {
+    reference_result <- power_network_results[[paste0("P", reference_power)]]
+    alternative_result <- power_network_results[[paste0("P", alternative_power)]]
+    wgcna_match_modules(
+      reference_colors = reference_result$colors,
+      alternative_colors = alternative_result$colors,
+      reference_eigengenes = reference_result$eigengenes,
+      projected_alternative_eigengenes = alternative_result$eigengenes,
+      max_p_outliers = max_p_outliers
+    ) %>%
+      dplyr::mutate(
+        reference_power = reference_power,
+        alternative_power = alternative_power,
+        .before = 1
+      )
+  }
+)
+
+set.seed(power_sensitivity_seed)
+power_resample_design <- purrr::map_dfr(
+  seq_len(power_resample_replicates),
+  function(resample_id) {
+    retained_samples <- metadata_aligned %>%
+      dplyr::filter(.data$station_tag %in% site_order) %>%
+      dplyr::group_by(.data$station_tag) %>%
+      dplyr::slice_sample(n = power_resample_libraries_per_site) %>%
+      dplyr::ungroup() %>%
+      dplyr::arrange(
+        match(.data$station_tag, site_order),
+        .data$sample_code
+      ) %>%
+      dplyr::pull(.data$sample_code)
+    tibble::tibble(
+      resample_id = resample_id,
+      retained_samples_list = list(retained_samples),
+      retained_samples = paste(retained_samples, collapse = ";")
+    )
+  }
+)
+
+run_power_resample <- function(power, resample_id,
+                               retained_samples_list, retained_samples) {
+  current_power <- power
+  reference_result <- power_network_results[[paste0("P", current_power)]]
+  current_signature <- paste(
+    power_cache_signature_base,
+    paste0("power=", current_power),
+    paste0("resample_id=", resample_id),
+    paste0("samples=", retained_samples),
+    sep = "||"
+  )
+  cache_file <- file.path(
+    power_resample_cache_dir,
+    paste0(
+      "P", current_power, "_resample_",
+      sprintf("%02d", resample_id), "_",
+      digest::digest(current_signature, algo = "xxhash64"),
+      ".rds"
+    )
+  )
+  if (reuse_power_sensitivity_cache && file.exists(cache_file)) {
+    cached <- readRDS(cache_file)
+    if (is.list(cached) && identical(cached$signature, current_signature)) {
+      message("Reusing power/resample cache P", current_power, " R", resample_id)
+      return(cached$result)
+    }
+  }
+  set.seed(power_sensitivity_seed + current_power * 100L + resample_id)
+  resampled_expression <- dat_expr_g10000[
+    match(retained_samples_list, rownames(dat_expr_g10000)),
+    ,
+    drop = FALSE
+  ]
+  alternative_result <- wgcna_run_validated_network(
+    dat_expr = resampled_expression,
+    power = current_power,
+    network_type = network_type,
+    correlation_type = correlation_type,
+    max_p_outliers = max_p_outliers,
+    minimum_module_size = minimum_module_size,
+    merge_cut_height = merge_cut_height,
+    deep_split = deep_split,
+    pam_respects_dendro = pam_respects_dendro,
+    max_block_size = max_block_size,
+    verbose = 0
+  )
+  projected_alternative <- wgcna_orient_eigengenes(
+    dat_expr_g10000,
+    alternative_result$colors,
+    max_p_outliers = max_p_outliers
+  )$eigengenes
+  result <- wgcna_match_modules(
+    reference_colors = reference_result$colors,
+    alternative_colors = alternative_result$colors,
+    reference_eigengenes = reference_result$eigengenes,
+    projected_alternative_eigengenes = projected_alternative,
+    max_p_outliers = max_p_outliers
+  ) %>%
+    dplyr::mutate(
+      power = current_power,
+      resample_id = resample_id,
+      retained_sample_n = length(retained_samples_list),
+      .before = 1
+    )
+  saveRDS(
+    list(signature = current_signature, result = result),
+    cache_file,
+    compress = FALSE
+  )
+  result
+}
+
+power_resampling_stability <- tidyr::expand_grid(
+  power = power_sensitivity_candidates,
+  resample_id = power_resample_design$resample_id
+) %>%
+  dplyr::left_join(power_resample_design, by = "resample_id") %>%
+  purrr::pmap_dfr(run_power_resample)
+
+power_resampling_module_summary <- power_resampling_stability %>%
+  dplyr::group_by(.data$power, .data$reference_module) %>%
+  dplyr::summarise(
+    module_median_resampling_jaccard = stats::median(
+      .data$jaccard, na.rm = TRUE
+    ),
+    module_minimum_resampling_jaccard = min(.data$jaccard, na.rm = TRUE),
+    module_median_resampling_eigengene_agreement = stats::median(
+      .data$eigengene_abs_correlation,
+      na.rm = TRUE
+    ),
+    module_reciprocal_match_fraction = mean(
+      .data$reciprocal_match, na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    candidate_moderate_resampling_module =
+      .data$module_median_resampling_jaccard >=
+      candidate_module_moderate_median_jaccard &
+      .data$module_minimum_resampling_jaccard >=
+      candidate_module_moderate_minimum_jaccard &
+      .data$module_median_resampling_eigengene_agreement >=
+      candidate_module_moderate_eigengene_agreement
+  )
+
+power_resampling_summary <- power_resampling_stability %>%
+  dplyr::group_by(.data$power) %>%
+  dplyr::summarise(
+    median_resampling_jaccard = stats::median(.data$jaccard, na.rm = TRUE),
+    minimum_resampling_jaccard = min(.data$jaccard, na.rm = TRUE),
+    median_resampling_eigengene_agreement = stats::median(
+      .data$eigengene_abs_correlation, na.rm = TRUE
+    ),
+    reciprocal_match_fraction = mean(.data$reciprocal_match, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(
+    power_resampling_module_summary %>%
+      dplyr::group_by(.data$power) %>%
+      dplyr::summarise(
+        candidate_moderate_resampling_module_n = sum(
+          .data$candidate_moderate_resampling_module
+        ),
+        candidate_moderate_resampling_module_fraction = mean(
+          .data$candidate_moderate_resampling_module
+        ),
+        .groups = "drop"
+      ),
+    by = "power"
+  )
+
+adjacent_power_summary_long <- dplyr::bind_rows(
+  power_adjacent_preservation %>%
+    dplyr::transmute(
+      power = .data$reference_power,
+      adjacent_pair = paste0(
+        .data$reference_power, "-", .data$alternative_power
+      ),
+      .data$jaccard,
+      .data$eigengene_abs_correlation
+    ),
+  power_adjacent_preservation %>%
+    dplyr::transmute(
+      power = .data$alternative_power,
+      adjacent_pair = paste0(
+        .data$reference_power, "-", .data$alternative_power
+      ),
+      .data$jaccard,
+      .data$eigengene_abs_correlation
+    )
+)
+adjacent_power_summary <- adjacent_power_summary_long %>%
+  dplyr::group_by(.data$power) %>%
+  dplyr::summarise(
+    median_adjacent_power_jaccard = stats::median(
+      .data$jaccard, na.rm = TRUE
+    ),
+    minimum_adjacent_power_jaccard = min(.data$jaccard, na.rm = TRUE),
+    median_adjacent_power_eigengene_agreement = stats::median(
+      .data$eigengene_abs_correlation, na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+maximum_candidate_scale_free_fit <- max(
+  g10000_soft_tbl$scale_free_fit,
+  na.rm = TRUE
+)
+final_power_selection_table <- g10000_soft_tbl %>%
+  dplyr::select(
+    .data$power,
+    signed_scale_free_fit = .data$scale_free_fit,
+    .data$slope,
+    .data$mean_connectivity,
+    .data$median_connectivity
+  ) %>%
+  dplyr::left_join(power_connectivity_distribution, by = "power") %>%
+  dplyr::left_join(power_network_structure, by = "power") %>%
+  dplyr::left_join(adjacent_power_summary, by = "power") %>%
+  dplyr::left_join(power_resampling_summary, by = "power") %>%
+  dplyr::mutate(
+    scale_free_fit_deficit_from_tested_maximum =
+      maximum_candidate_scale_free_fit - .data$signed_scale_free_fit,
+    overly_sparse =
+      .data$median_connectivity < adequate_median_connectivity_threshold,
+    adequate_connectivity = !.data$overly_sparse,
+    near_best_scale_free_fit =
+      .data$scale_free_fit_deficit_from_tested_maximum <=
+      maximum_scale_free_fit_deficit,
+    adequate_resampling_stability =
+      .data$candidate_moderate_resampling_module_n >= 1L,
+    structurally_eligible =
+      .data$adequate_connectivity &
+      .data$near_best_scale_free_fit &
+      .data$adequate_resampling_stability
+  )
+
+eligible_powers <- final_power_selection_table$power[
+  final_power_selection_table$structurally_eligible
+]
+if (length(eligible_powers) == 0L) {
+  stop(
+    "No tested power met the predeclared connectivity, fit-deficit, and ",
+    "resampling-stability criteria."
+  )
+}
+final_selected_power <- min(eligible_powers)
+final_power_selection_table <- final_power_selection_table %>%
+  dplyr::mutate(
+    selected = .data$power == final_selected_power,
+    decision = dplyr::case_when(
+      .data$selected ~ paste(
+        "selected: lowest structurally eligible power after scale-free-fit",
+        "improvements became marginal"
+      ),
+      .data$overly_sparse ~
+        "not selected: median connectivity below the declared adequacy threshold",
+      !.data$near_best_scale_free_fit ~
+        "not selected: scale-free-fit deficit exceeds the declared tolerance",
+      !.data$adequate_resampling_stability ~ paste(
+        "not selected: no module met the moderate resampling membership",
+        "and eigengene thresholds"
+      ),
+      TRUE ~ "eligible but higher than the selected power"
+    ),
+    selection_uses_site_contrasts = FALSE,
+    selection_uses_deg_overlap = FALSE,
+    selection_uses_enrichment = FALSE,
+    selection_uses_chemistry = FALSE
+  )
+
+final_power_result <- power_network_results[[
+  paste0("P", final_selected_power)
+]]
+
+write_csv_safe(
+  final_power_selection_table,
+  file.path(tables_dir, "final_power_selection_table.csv")
+)
+write_csv_safe(
+  power_adjacent_preservation,
+  file.path(tables_dir, "power_adjacent_module_preservation.csv")
+)
+write_csv_safe(
+  power_resampling_stability,
+  file.path(tables_dir, "power_site_stratified_resampling_stability.csv")
+)
+write_csv_safe(
+  power_resampling_module_summary,
+  file.path(tables_dir, "power_module_resampling_summary.csv")
+)
+write_csv_safe(
+  power_resample_design %>% dplyr::select(-.data$retained_samples_list),
+  file.path(tables_dir, "power_resampling_design.csv")
+)
+write_csv_safe(
+  power_module_audit,
+  file.path(tables_dir, "power_module_identity_audit.csv")
+)
+write_csv_safe(
+  power_anomalous_gene_audit,
+  file.path(tables_dir, "power_undersized_module_gene_audit.csv")
+)
+write_csv_safe(
+  power_eigengene_orientation,
+  file.path(tables_dir, "power_eigengene_orientation.csv")
+)
+
+knitr::kable(
+  final_power_selection_table,
+  digits = 4,
+  caption = "Structural decision table for the 10,000-gene network power."
+)
+```
+
+```{r power-decision-plot, fig.width=10, fig.height=7}
+power_decision_plot <- final_power_selection_table %>%
+  dplyr::select(
+    .data$power,
+    `Scale-free fit` = .data$signed_scale_free_fit,
+    `Median connectivity (scaled)` = .data$median_connectivity,
+    `Median resampling Jaccard` = .data$median_resampling_jaccard,
+    `Median adjacent-power Jaccard` = .data$median_adjacent_power_jaccard
+  ) %>%
+  dplyr::mutate(
+    `Median connectivity (scaled)` =
+      `Median connectivity (scaled)` /
+      max(`Median connectivity (scaled)`, na.rm = TRUE)
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -"power",
+    names_to = "diagnostic",
+    values_to = "value"
+  ) %>%
+  ggplot2::ggplot(ggplot2::aes(.data$power, .data$value)) +
+  ggplot2::geom_line() +
+  ggplot2::geom_point(size = 2.5) +
+  ggplot2::geom_vline(
+    xintercept = final_selected_power,
+    linetype = "dashed",
+    colour = "#b03a2e"
+  ) +
+  ggplot2::facet_wrap(~diagnostic, scales = "free_y", ncol = 2) +
+  ggplot2::labs(
+    title = "Structural power sensitivity for the 10,000-gene network",
+    subtitle = paste("Selected power:", final_selected_power),
+    x = "Soft-thresholding power",
+    y = "Diagnostic value"
+  ) +
+  theme_publication()
+save_plot_bundle(
+  power_decision_plot,
+  file.path(plots_dir, "final_power_structural_decision"),
+  width = 10,
+  height = 7
+)
+power_decision_plot
+```
+
+# 9. Permitted evidence for network selection
+
+```{r network-selection-evidence-policy}
+network_selection_evidence_policy <- tibble::tribble(
+  ~decision_domain, ~permitted_for_network_selection, ~role,
+  "Connectivity and sparsity", "Yes", "primary structural criterion",
+  "Module size and grey fraction", "Yes", "primary structural criterion",
+  "Resampling stability", "Yes", "primary structural criterion",
+  "Cross-universe preservation", "Yes", "primary structural criterion",
+  "Annotation coverage", "Yes, secondary", "practical coverage criterion",
+  "Number of significant site contrasts", "No", "downstream sensitivity only",
+  "DEG overlap", "No", "downstream sensitivity only",
+  "GO or KEGG enrichment count", "No", "downstream sensitivity only",
+  "Chemistry correlation", "No", "post-selection exploratory context only"
+)
+write_csv_safe(
+  network_selection_evidence_policy,
+  file.path(tables_dir, "network_selection_evidence_policy.csv")
+)
+knitr::kable(
+  network_selection_evidence_policy,
+  caption = "Evidence hierarchy enforced for network selection."
+)
+```
+
+# 10. Final-power cross-universe preservation
+
+The cross-universe confirmation below replaces the provisional 10,000-gene
+power-20 membership with the structurally selected power-14 membership. This
+prevents the final gene-universe dashboard from mixing provisional and final
+network statistics.
+
+```{r final-power-cross-universe-preservation}
+final_g10000_comparison_result <- list(
+  network_label = paste0("G10000_P", final_selected_power),
+  network_size = 10000L,
+  assignment = final_power_result$assignment,
+  eigengenes = tibble::as_tibble(
+    final_power_result$eigengenes,
+    rownames = "sample_code"
+  )
+)
+
+final_universe_module_preservation <- dplyr::bind_rows(
+  compare_network_pair(
+    network_results$G5000,
+    final_g10000_comparison_result
+  ),
+  compare_network_pair(
+    final_g10000_comparison_result,
+    network_results$G15000
+  )
+)
+
+final_universe_preservation_summary <-
+  final_universe_module_preservation %>%
+  dplyr::group_by(
+    .data$reference_network,
+    .data$test_network,
+    .data$reference_size,
+    .data$test_size
+  ) %>%
+  dplyr::summarise(
+    n_reference_modules = dplyr::n(),
+    median_jaccard = stats::median(.data$jaccard, na.rm = TRUE),
+    minimum_jaccard = min(.data$jaccard, na.rm = TRUE),
+    median_reference_recovery = stats::median(
+      .data$reference_recovery_fraction,
+      na.rm = TRUE
+    ),
+    median_abs_eigengene_cor = stats::median(
+      .data$eigengene_profile_abs_cor,
+      na.rm = TRUE
+    ),
+    n_high_preservation = sum(
+      .data$preservation_class == "high",
+      na.rm = TRUE
+    ),
+    n_moderate_preservation = sum(
+      .data$preservation_class == "moderate",
+      na.rm = TRUE
+    ),
+    n_low_preservation = sum(
+      .data$preservation_class == "low",
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+final_g10000_eligible_gene_ids <- unique(
+  final_power_result$assignment$gene_id
+)
+final_g10000_assigned_gene_ids <- unique(
+  final_power_result$assignment$gene_id[
+    final_power_result$assignment$module != "grey"
+  ]
+)
+annotated_gene_ids <- annotation_gene_tbl$gene_id[
+  annotation_gene_tbl$has_readable_annotation
+]
+final_g10000_coverage <- tibble::tibble(
+  network_label = "G10000",
+  network_size = 10000L,
+  eligible_gene_n = length(final_g10000_eligible_gene_ids),
+  assigned_gene_n = length(final_g10000_assigned_gene_ids),
+  readable_annotation_eligible_n = length(intersect(
+    final_g10000_eligible_gene_ids,
+    annotated_gene_ids
+  )),
+  readable_annotation_assigned_n = length(intersect(
+    final_g10000_assigned_gene_ids,
+    annotated_gene_ids
+  )),
+  go_mapped_eligible_n = length(intersect(
+    final_g10000_eligible_gene_ids,
+    go_gene_ids
+  )),
+  go_mapped_assigned_n = length(intersect(
+    final_g10000_assigned_gene_ids,
+    go_gene_ids
+  ))
+) %>%
+  dplyr::mutate(
+    readable_annotation_eligible_fraction = safe_divide(
+      .data$readable_annotation_eligible_n,
+      .data$eligible_gene_n
+    ),
+    readable_annotation_assigned_fraction = safe_divide(
+      .data$readable_annotation_assigned_n,
+      .data$assigned_gene_n
+    ),
+    go_mapped_eligible_fraction = safe_divide(
+      .data$go_mapped_eligible_n,
+      .data$eligible_gene_n
+    ),
+    go_mapped_assigned_fraction = safe_divide(
+      .data$go_mapped_assigned_n,
+      .data$assigned_gene_n
+    )
+  )
+
+network_gene_coverage <- dplyr::bind_rows(
+  network_gene_coverage %>%
+    dplyr::filter(.data$network_size != 10000L),
+  final_g10000_coverage
+) %>%
+  dplyr::arrange(.data$network_size)
+
+final_g10000_deg_coverage <- planned_contrasts %>%
+  dplyr::select(.data$contrast, .data$contrast_panel) %>%
+  dplyr::mutate(
+    network_label = "G10000",
+    network_size = 10000L,
+    total_significant_deg_n = purrr::map_int(
+      .data$contrast,
+      ~dplyr::n_distinct(focal_deg_tbl$gene_id[
+        focal_deg_tbl$contrast == .x
+      ])
+    ),
+    eligible_significant_deg_n = purrr::map_int(
+      .data$contrast,
+      ~length(intersect(
+        focal_deg_tbl$gene_id[focal_deg_tbl$contrast == .x],
+        final_g10000_eligible_gene_ids
+      ))
+    ),
+    assigned_significant_deg_n = purrr::map_int(
+      .data$contrast,
+      ~length(intersect(
+        focal_deg_tbl$gene_id[focal_deg_tbl$contrast == .x],
+        final_g10000_assigned_gene_ids
+      ))
+    )
+  ) %>%
+  dplyr::mutate(
+    eligible_deg_fraction = safe_divide(
+      .data$eligible_significant_deg_n,
+      .data$total_significant_deg_n
+    ),
+    assigned_deg_fraction_of_total = safe_divide(
+      .data$assigned_significant_deg_n,
+      .data$total_significant_deg_n
+    ),
+    assigned_deg_fraction_of_eligible = safe_divide(
+      .data$assigned_significant_deg_n,
+      .data$eligible_significant_deg_n
+    )
+  )
+
+deg_coverage <- dplyr::bind_rows(
+  deg_coverage %>% dplyr::filter(.data$network_size != 10000L),
+  final_g10000_deg_coverage
+) %>%
+  dplyr::arrange(.data$network_size, .data$contrast)
+
+write_csv_safe(
+  network_gene_coverage,
+  file.path(tables_dir, "annotation_and_go_coverage_by_gene_set.csv")
+)
+write_csv_safe(
+  deg_coverage,
+  file.path(tables_dir, "focal_deg_coverage_by_gene_set.csv")
+)
+
+write_csv_safe(
+  final_universe_module_preservation,
+  file.path(tables_dir, "final_power_module_preservation_across_gene_sets.csv")
+)
+write_csv_safe(
+  final_universe_preservation_summary,
+  file.path(tables_dir, "final_power_module_preservation_summary.csv")
+)
+knitr::kable(
+  final_universe_preservation_summary,
+  digits = 3,
+  caption = "Cross-universe preservation after substituting the final 10,000-gene power network."
+)
+```
+
+# 11. Site-stratified stability across gene universes
+
+The same ten four-of-five-per-site resamples are used to compare the 5,000-,
+10,000-, and 15,000-gene candidates. The 10,000-gene reference uses the
+structurally selected power above; the other universes retain their independently
+evaluated powers from the nested-universe analysis.
+
+```{r gene-universe-resampling-stability, message=TRUE}
+make_universe_reference <- function(network_label) {
+  if (network_label == "G10000") {
+    return(list(
+      network_label = network_label,
+      network_size = 10000L,
+      power = final_selected_power,
+      gene_ids = g10000_gene_ids,
+      dat_expr = dat_expr_g10000,
+      colors = final_power_result$colors,
+      eigengenes = final_power_result$eigengenes
+    ))
+  }
+  current_result <- network_results[[network_label]]
+  current_gene_ids <- current_result$selected_gene_ids
+  current_dat_expr <- t(
+    expression_matrix[current_gene_ids, , drop = FALSE]
+  )
+  rownames(current_dat_expr) <- metadata_aligned$sample_code
+  current_colors <- stats::setNames(
+    as.character(current_result$assignment$module),
+    as.character(current_result$assignment$gene_id)
+  )[colnames(current_dat_expr)]
+  me_columns_current <- grep(
+    "^ME", names(current_result$eigengenes), value = TRUE
+  )
+  current_me <- current_result$eigengenes %>%
+    dplyr::slice(match(rownames(current_dat_expr), .data$sample_code)) %>%
+    dplyr::select(dplyr::all_of(me_columns_current)) %>%
+    as.data.frame()
+  rownames(current_me) <- rownames(current_dat_expr)
+  list(
+    network_label = network_label,
+    network_size = current_result$network_size,
+    power = as.integer(current_result$summary$selected_power[[1]]),
+    gene_ids = current_gene_ids,
+    dat_expr = current_dat_expr,
+    colors = current_colors,
+    eigengenes = current_me
+  )
+}
+
+universe_reference_objects <- purrr::map(
+  paste0("G", gene_set_sizes),
+  make_universe_reference
+)
+names(universe_reference_objects) <- paste0("G", gene_set_sizes)
+
+universe_resample_cache_dir <- file.path(
+  objects_dir, "gene_universe_resample_cache"
+)
+dir.create(
+  universe_resample_cache_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+run_universe_resample <- function(network_label, resample_id,
+                                  retained_samples_list, retained_samples) {
+  reference <- universe_reference_objects[[network_label]]
+  if (network_label == "G10000") {
+    return(
+      power_resampling_stability %>%
+        dplyr::filter(
+          .data$power == final_selected_power,
+          .data$resample_id == resample_id
+        ) %>%
+        dplyr::mutate(
+          network_label = network_label,
+          network_size = 10000L,
+          .before = 1
+        )
+    )
+  }
+  current_signature <- paste(
+    power_cache_signature_base,
+    paste0("universe=", network_label),
+    paste0("gene_hash=", digest::digest(reference$gene_ids, algo = "xxhash64")),
+    paste0("power=", reference$power),
+    paste0("resample_id=", resample_id),
+    paste0("samples=", retained_samples),
+    sep = "||"
+  )
+  cache_file <- file.path(
+    universe_resample_cache_dir,
+    paste0(
+      network_label, "_resample_", sprintf("%02d", resample_id), "_",
+      digest::digest(current_signature, algo = "xxhash64"), ".rds"
+    )
+  )
+  if (reuse_power_sensitivity_cache && file.exists(cache_file)) {
+    cached <- readRDS(cache_file)
+    if (is.list(cached) && identical(cached$signature, current_signature)) {
+      message("Reusing universe/resample cache ", network_label, " R", resample_id)
+      return(cached$result)
+    }
+  }
+  set.seed(
+    power_sensitivity_seed + reference$network_size + resample_id
+  )
+  resampled_expression <- reference$dat_expr[
+    match(retained_samples_list, rownames(reference$dat_expr)),
+    ,
+    drop = FALSE
+  ]
+  alternative <- wgcna_run_validated_network(
+    dat_expr = resampled_expression,
+    power = reference$power,
+    network_type = network_type,
+    correlation_type = correlation_type,
+    max_p_outliers = max_p_outliers,
+    minimum_module_size = minimum_module_size,
+    merge_cut_height = merge_cut_height,
+    deep_split = deep_split,
+    pam_respects_dendro = pam_respects_dendro,
+    max_block_size = max_block_size,
+    verbose = 0
+  )
+  projected_alternative <- wgcna_orient_eigengenes(
+    reference$dat_expr,
+    alternative$colors,
+    max_p_outliers = max_p_outliers
+  )$eigengenes
+  result <- wgcna_match_modules(
+    reference_colors = reference$colors,
+    alternative_colors = alternative$colors,
+    reference_eigengenes = reference$eigengenes,
+    projected_alternative_eigengenes = projected_alternative,
+    max_p_outliers = max_p_outliers
+  ) %>%
+    dplyr::mutate(
+      network_label = network_label,
+      network_size = reference$network_size,
+      power = reference$power,
+      resample_id = resample_id,
+      retained_sample_n = length(retained_samples_list),
+      .before = 1
+    )
+  saveRDS(
+    list(signature = current_signature, result = result),
+    cache_file,
+    compress = FALSE
+  )
+  result
+}
+
+gene_universe_resampling_stability <- tidyr::expand_grid(
+  network_label = names(universe_reference_objects),
+  resample_id = power_resample_design$resample_id
+) %>%
+  dplyr::left_join(power_resample_design, by = "resample_id") %>%
+  purrr::pmap_dfr(run_universe_resample)
+
+gene_universe_resampling_summary <- gene_universe_resampling_stability %>%
+  dplyr::group_by(.data$network_label, .data$network_size, .data$power) %>%
+  dplyr::summarise(
+    median_resampling_jaccard = stats::median(.data$jaccard, na.rm = TRUE),
+    minimum_resampling_jaccard = min(.data$jaccard, na.rm = TRUE),
+    median_eigengene_agreement = stats::median(
+      .data$eigengene_abs_correlation,
+      na.rm = TRUE
+    ),
+    reciprocal_match_fraction = mean(.data$reciprocal_match, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv_safe(
+  gene_universe_resampling_stability,
+  file.path(tables_dir, "gene_universe_resampling_stability.csv")
+)
+write_csv_safe(
+  gene_universe_resampling_summary,
+  file.path(tables_dir, "gene_universe_resampling_summary.csv")
+)
+knitr::kable(
+  gene_universe_resampling_summary,
+  digits = 3,
+  caption = "Site-stratified module stability across nested gene universes."
+)
+```
+
+# 11. Integrated decision dashboard
+
+The decision dashboard contains only structural criteria plus annotation
+coverage as a secondary practical consideration. Site-contrast significance,
+DEG recovery, and functional yield are exported in a separate downstream
+sensitivity table and cannot affect the network choice.
+
+```{r decision-dashboard}
+preservation_as_reference <- final_universe_preservation_summary %>%
+  dplyr::group_by(.data$reference_size) %>%
+  dplyr::summarise(
+    median_jaccard_to_larger = stats::median(
+      .data$median_jaccard,
+      na.rm = TRUE
+    ),
+    median_abs_eigengene_cor_to_larger = stats::median(
+      .data$median_abs_eigengene_cor,
+      na.rm = TRUE
+    ),
+    minimum_high_preservation_modules = min(
+      .data$n_high_preservation,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(network_size = .data$reference_size)
+
+contrast_dashboard <- planned_contrasts_all %>%
+  dplyr::group_by(
+    .data$network_label,
+    .data$network_size
+  ) %>%
+  dplyr::summarise(
+    n_fdr_supported_module_contrasts = sum(
+      .data$fdr_supported,
+      na.rm = TRUE
+    ),
+    n_large_nominal_module_contrasts = sum(
+      .data$large_nominal_effect,
+      na.rm = TRUE
+    ),
+    maximum_abs_hedges_g = max(
+      abs(.data$hedges_g),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+deg_dashboard <- deg_coverage %>%
+  dplyr::group_by(
+    .data$network_label,
+    .data$network_size
+  ) %>%
+  dplyr::summarise(
+    mean_eligible_deg_fraction = mean(
+      .data$eligible_deg_fraction,
+      na.rm = TRUE
+    ),
+    mean_assigned_deg_fraction_of_total = mean(
+      .data$assigned_deg_fraction_of_total,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+decision_dashboard <- network_summary %>%
+  dplyr::transmute(
+    .data$network_label,
+    network_size = .data$requested_gene_n,
+    .data$selected_power,
+    .data$selected_scale_free_fit,
+    .data$selected_mean_connectivity,
+    .data$selected_median_connectivity,
+    .data$target_reached,
+    .data$n_assigned_modules,
+    .data$assigned_gene_fraction,
+    .data$grey_gene_fraction,
+    .data$n_blocks
+  ) %>%
+  dplyr::left_join(
+    preservation_as_reference,
+    by = "network_size"
+  ) %>%
+  dplyr::left_join(
+    gene_universe_resampling_summary %>%
+      dplyr::select(
+        .data$network_label,
+        .data$network_size,
+        resampling_power = .data$power,
+        .data$median_resampling_jaccard,
+        .data$minimum_resampling_jaccard,
+        .data$median_eigengene_agreement,
+        .data$reciprocal_match_fraction
+      ),
+    by = c("network_label", "network_size")
+  ) %>%
+  dplyr::left_join(
+    network_gene_coverage,
+    by = c("network_label", "network_size")
+  ) %>%
+  dplyr::mutate(
+    selected_power = dplyr::if_else(
+      .data$network_size == 10000L,
+      as.numeric(final_power_selection_table$power[
+        final_power_selection_table$selected
+      ]),
+      as.numeric(.data$selected_power)
+    ),
+    selected_scale_free_fit = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$signed_scale_free_fit[
+        final_power_selection_table$selected
+      ],
+      .data$selected_scale_free_fit
+    ),
+    selected_mean_connectivity = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$mean_connectivity[
+        final_power_selection_table$selected
+      ],
+      .data$selected_mean_connectivity
+    ),
+    selected_median_connectivity = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$median_connectivity[
+        final_power_selection_table$selected
+      ],
+      .data$selected_median_connectivity
+    ),
+    target_reached = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$signed_scale_free_fit[
+        final_power_selection_table$selected
+      ] >= soft_threshold_target,
+      .data$target_reached
+    ),
+    n_assigned_modules = dplyr::if_else(
+      .data$network_size == 10000L,
+      as.integer(final_power_selection_table$module_n[
+        final_power_selection_table$selected
+      ]),
+      as.integer(.data$n_assigned_modules)
+    ),
+    assigned_gene_fraction = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$assigned_gene_fraction[
+        final_power_selection_table$selected
+      ],
+      .data$assigned_gene_fraction
+    ),
+    grey_gene_fraction = dplyr::if_else(
+      .data$network_size == 10000L,
+      final_power_selection_table$grey_fraction[
+        final_power_selection_table$selected
+      ],
+      .data$grey_gene_fraction
+    ),
+    n_blocks = dplyr::if_else(
+      .data$network_size == 10000L,
+      as.integer(final_power_selection_table$n_blocks[
+        final_power_selection_table$selected
+      ]),
+      as.integer(.data$n_blocks)
+    )
+  ) %>%
+  dplyr::arrange(.data$network_size)
+
+downstream_sensitivity_dashboard <- contrast_dashboard %>%
+  dplyr::left_join(
+    deg_dashboard,
+    by = c("network_label", "network_size")
+  ) %>%
+  dplyr::mutate(
+    permitted_for_network_selection = FALSE,
+    role = "downstream sensitivity only"
+  ) %>%
+  dplyr::arrange(.data$network_size)
+
+write_csv_safe(
+  decision_dashboard,
+  file.path(tables_dir, "wgcna_gene_set_decision_dashboard.csv")
+)
+write_csv_safe(
+  downstream_sensitivity_dashboard,
+  file.path(tables_dir, "wgcna_downstream_sensitivity_dashboard.csv")
+)
+
+knitr::kable(
+  decision_dashboard,
+  digits = 4,
+  caption = "Structural diagnostics for selecting the final WGCNA gene set."
+)
+knitr::kable(
+  downstream_sensitivity_dashboard,
+  digits = 4,
+  caption = "Downstream results excluded from network selection."
+)
+```
+
+## Selected network for the downstream exploratory rerun
+
+The 10,000-gene universe is selected as the smallest expanded network that
+retains much of the 5,000-gene structure without the greater fragmentation and
+weaker incremental preservation of the 15,000-gene expansion. Its improved
+annotation coverage is a secondary practical benefit. DEG recovery, site
+significance, enrichment yield, and chemistry do not enter this decision.
+
+```{r selected-network-handoff}
+selected_gene_set_size <- 10000L
+selected_network_label <- paste0("G", selected_gene_set_size)
+
+if (!selected_network_label %in% names(network_results)) {
+  stop("The selected WGCNA gene-set size was not reconstructed.")
+}
+
+selected_network_result <- final_power_result
+selected_network_summary <- final_power_selection_table %>%
+  dplyr::filter(.data$selected) %>%
+  dplyr::transmute(
+    selected_power = .data$power,
+    selected_power_rule = .data$decision,
+    selected_scale_free_fit = .data$signed_scale_free_fit,
+    selected_slope = .data$slope,
+    selected_mean_connectivity = .data$mean_connectivity,
+    selected_median_connectivity = .data$median_connectivity,
+    target_reached = .data$signed_scale_free_fit >= soft_threshold_target,
+    n_blocks = .env$final_power_result$n_blocks
+  )
+
+selected_module_membership <- selected_network_result$assignment %>%
+  dplyr::mutate(
+    network_label = selected_network_label,
+    network_size = selected_gene_set_size,
+    .before = 1
+  )
+
+selected_kme_tbl <- tibble::as_tibble(
+  WGCNA::signedKME(
+    dat_expr_g10000,
+    selected_network_result$eigengenes,
+    outputColumnName = "kME",
+    corFnc = correlation_type,
+    corOptions = paste0("maxPOutliers = ", max_p_outliers)
+  ),
+  rownames = "gene_id"
+)
+selected_module_membership$module_kME_signed <- NA_real_
+for (current_module in unique(selected_module_membership$module)) {
+  current_column <- paste0("kME", current_module)
+  current_rows <- selected_module_membership$module == current_module
+  if (current_column %in% names(selected_kme_tbl)) {
+    selected_module_membership$module_kME_signed[current_rows] <-
+      selected_kme_tbl[[current_column]][match(
+        selected_module_membership$gene_id[current_rows],
+        selected_kme_tbl$gene_id
+      )]
+  }
+}
+selected_module_membership <- selected_module_membership %>%
+  dplyr::mutate(
+    module_kME_abs = abs(.data$module_kME_signed)
+  )
+
+selected_module_summary <- selected_network_result$module_summary %>%
+  dplyr::select(
+    .data$module,
+    .data$n_genes,
+    .data$module_type,
+    .data$module_label
+  )
+selected_module_eigengenes_by_sample <- tibble::as_tibble(
+  selected_network_result$eigengenes,
+  rownames = "sample_code"
+) %>%
+  dplyr::left_join(
+    metadata_aligned %>%
+      dplyr::select(
+        .data$sample_code,
+        .data$site_id,
+        .data$station_tag,
+        dplyr::any_of(c("display_label", "site_name", "station_order"))
+      ),
+    by = "sample_code"
+  )
+selected_me_columns <- grep(
+  "^ME",
+  names(selected_module_eigengenes_by_sample),
+  value = TRUE
+)
+selected_site_columns <- intersect(
+  c(
+    "site_id",
+    "station_tag",
+    "display_label",
+    "site_name",
+    "station_order"
+  ),
+  names(selected_module_eigengenes_by_sample)
+)
+selected_module_eigengenes_by_site <-
+  selected_module_eigengenes_by_sample %>%
+  dplyr::group_by(dplyr::across(dplyr::all_of(selected_site_columns))) %>%
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::all_of(selected_me_columns),
+      ~mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+selected_soft_threshold_diagnostics <-
+  network_results$G10000$soft
+selected_soft_threshold_decision <- tibble::tibble(
+  selected_power = selected_network_summary$selected_power,
+  rule = selected_network_summary$selected_power_rule,
+  target = soft_threshold_target,
+  network_type = network_type,
+  target_reached = selected_network_summary$target_reached
+)
+
+selected_membership_file <- file.path(
+  tables_dir,
+  "selected_wgcna_gene_module_membership.csv"
+)
+selected_eigengene_sample_file <- file.path(
+  tables_dir,
+  "selected_wgcna_module_eigengenes_by_sample.csv"
+)
+selected_eigengene_site_file <- file.path(
+  tables_dir,
+  "selected_wgcna_module_eigengenes_by_site.csv"
+)
+selected_module_summary_file <- file.path(
+  tables_dir,
+  "selected_wgcna_module_summary.csv"
+)
+selected_soft_diagnostics_file <- file.path(
+  tables_dir,
+  "selected_wgcna_soft_threshold_diagnostics.csv"
+)
+selected_soft_decision_file <- file.path(
+  tables_dir,
+  "selected_wgcna_soft_threshold_decision.csv"
+)
+selected_orientation_file <- file.path(
+  tables_dir,
+  "selected_wgcna_eigengene_orientation.csv"
+)
+selected_module_identity_audit_file <- file.path(
+  tables_dir,
+  "selected_wgcna_module_identity_audit.csv"
+)
+
+write_csv_safe(selected_module_membership, selected_membership_file)
+write_csv_safe(
+  selected_module_eigengenes_by_sample,
+  selected_eigengene_sample_file
+)
+write_csv_safe(
+  selected_module_eigengenes_by_site,
+  selected_eigengene_site_file
+)
+write_csv_safe(selected_module_summary, selected_module_summary_file)
+write_csv_safe(
+  selected_soft_threshold_diagnostics,
+  selected_soft_diagnostics_file
+)
+write_csv_safe(
+  selected_soft_threshold_decision,
+  selected_soft_decision_file
+)
+write_csv_safe(
+  selected_network_result$orientation,
+  selected_orientation_file
+)
+write_csv_safe(
+  selected_network_result$module_audit,
+  selected_module_identity_audit_file
+)
+
+valid_selected_sizes <- selected_module_summary$n_genes[
+  selected_module_summary$module != "grey"
+]
+if (nrow(selected_module_membership) != selected_gene_set_size) {
+  stop("Final requested gene count does not equal retained network gene count.")
+}
+if (any(valid_selected_sizes < minimum_module_size)) {
+  stop("The selected network contains an undersized assigned module.")
+}
+if (!setequal(
+  paste0("ME", sort(unique(selected_module_membership$module))),
+  selected_me_columns
+)) {
+  stop("Selected module-colour labels do not match eigengene labels.")
+}
+
+selection_evidence <- tibble::tibble(
+  criterion = c(
+    "G5000_to_G10000_median_Jaccard",
+    "G5000_to_G10000_median_abs_eigengene_correlation",
+    "G10000_to_G15000_median_Jaccard",
+    "G10000_to_G15000_low_preservation_modules",
+    "G5000_median_resampling_Jaccard",
+    "G10000_median_resampling_Jaccard",
+    "G15000_median_resampling_Jaccard",
+    "G5000_GO_mapped_eligible_genes",
+    "G10000_GO_mapped_eligible_genes",
+    "G15000_GO_mapped_eligible_genes",
+    "G10000_selected_power",
+    "G10000_selected_power_median_connectivity",
+    "G10000_selected_power_median_resampling_Jaccard"
+  ),
+  value = c(
+    final_universe_preservation_summary$median_jaccard[
+      final_universe_preservation_summary$reference_size == 5000L &
+        final_universe_preservation_summary$test_size == 10000L
+    ],
+    final_universe_preservation_summary$median_abs_eigengene_cor[
+      final_universe_preservation_summary$reference_size == 5000L &
+        final_universe_preservation_summary$test_size == 10000L
+    ],
+    final_universe_preservation_summary$median_jaccard[
+      final_universe_preservation_summary$reference_size == 10000L &
+        final_universe_preservation_summary$test_size == 15000L
+    ],
+    final_universe_preservation_summary$n_low_preservation[
+      final_universe_preservation_summary$reference_size == 10000L &
+        final_universe_preservation_summary$test_size == 15000L
+    ],
+    gene_universe_resampling_summary$median_resampling_jaccard[
+      gene_universe_resampling_summary$network_size == 5000L
+    ],
+    gene_universe_resampling_summary$median_resampling_jaccard[
+      gene_universe_resampling_summary$network_size == 10000L
+    ],
+    gene_universe_resampling_summary$median_resampling_jaccard[
+      gene_universe_resampling_summary$network_size == 15000L
+    ],
+    network_gene_coverage$go_mapped_eligible_n[
+      network_gene_coverage$network_size == 5000L
+    ],
+    network_gene_coverage$go_mapped_eligible_n[
+      network_gene_coverage$network_size == 10000L
+    ],
+    network_gene_coverage$go_mapped_eligible_n[
+      network_gene_coverage$network_size == 15000L
+    ],
+    final_selected_power,
+    final_power_selection_table$median_connectivity[
+      final_power_selection_table$selected
+    ],
+    final_power_selection_table$median_resampling_jaccard[
+      final_power_selection_table$selected
+    ]
+  ),
+  permitted_for_selection = c(
+    rep(TRUE, 7),
+    rep("secondary", 3),
+    rep(TRUE, 3)
+  )
+)
+write_csv_safe(
+  selection_evidence,
+  file.path(tables_dir, "selected_wgcna_network_evidence.csv")
+)
+
+project_relative_path <- function(path) {
+  absolute_path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  project_prefix <- paste0(project_dir, "/")
+  if (startsWith(absolute_path, project_prefix)) {
+    substring(absolute_path, nchar(project_prefix) + 1L)
+  } else {
+    absolute_path
+  }
+}
+
+selected_network_manifest <- tibble::tibble(
+  selection_status = "final_selected_for_step08",
+  selection_rule = paste(
+    "10,000 genes selected from structural cross-universe preservation,",
+    "resampling stability, connectivity and module assignment; annotation",
+    "coverage used only secondarily; site, DEG, enrichment and chemistry",
+    "results excluded. Power is the lowest structurally eligible candidate"
+  ),
+  selected_network_label = selected_network_label,
+  selected_gene_set_size = selected_gene_set_size,
+  selected_power = selected_network_summary$selected_power,
+  soft_threshold_target = soft_threshold_target,
+  soft_threshold_target_reached = selected_network_summary$target_reached,
+  network_type = network_type,
+  correlation_type = correlation_type,
+  max_p_outliers = max_p_outliers,
+  minimum_module_size = minimum_module_size,
+  merge_cut_height = merge_cut_height,
+  deep_split = deep_split,
+  pam_respects_dendro = pam_respects_dendro,
+  max_block_size = max_block_size,
+  n_blocks = selected_network_summary$n_blocks,
+  wgcna_version = as.character(utils::packageVersion("WGCNA")),
+  eigengene_orientation_rule =
+    "positive correlation with average standardized member-gene expression",
+  undersized_module_policy =
+    "reclassify post-blockwise non-grey groups below minModuleSize to exact grey",
+  gene_membership_file = project_relative_path(selected_membership_file),
+  module_eigengenes_by_sample_file = project_relative_path(
+    selected_eigengene_sample_file
+  ),
+  module_eigengenes_by_site_file = project_relative_path(
+    selected_eigengene_site_file
+  ),
+  module_summary_file = project_relative_path(selected_module_summary_file),
+  soft_threshold_diagnostics_file = project_relative_path(
+    selected_soft_diagnostics_file
+  ),
+  soft_threshold_decision_file = project_relative_path(
+    selected_soft_decision_file
+  ),
+  eigengene_orientation_file = project_relative_path(selected_orientation_file),
+  module_identity_audit_file = project_relative_path(
+    selected_module_identity_audit_file
+  ),
+  final_power_selection_file = project_relative_path(
+    file.path(tables_dir, "final_power_selection_table.csv")
+  )
+)
+write_csv_safe(
+  selected_network_manifest,
+  file.path(tables_dir, "selected_wgcna_network_manifest.csv")
+)
+
+knitr::kable(
+  selected_network_manifest %>%
+    dplyr::select(
+      .data$selected_network_label,
+      .data$selected_gene_set_size,
+      .data$selected_power,
+      .data$soft_threshold_target_reached,
+      .data$n_blocks,
+      .data$max_block_size
+    ),
+  caption = "WGCNA network selected for the final site-associated module analysis."
+)
+knitr::kable(
+  selection_evidence,
+  digits = 4,
+  caption = "Evidence retained with the selected-network decision."
+)
+```
+
+```{r decision-notes, results='asis'}
+cat("## Reading the comparison\n\n")
+
+if (all(!network_summary$target_reached)) {
+  cat(
+    "None of the tested gene sets reached the prespecified scale-free-topology target. ",
+    "The final network should therefore not be described as scale-free, and gene-set selection should rely on the combined diagnostics rather than on this statistic alone.\n\n",
+    sep = ""
+  )
+} else {
+  reached_sizes <- network_summary$requested_gene_n[
+    network_summary$target_reached
+  ]
+  cat(
+    "The scale-free-topology target was reached by: ",
+    paste(format(reached_sizes, big.mark = ","), collapse = ", "),
+    " genes. This remains one network diagnostic rather than a sufficient selection criterion.\n\n",
+    sep = ""
+  )
+}
+
+if (nrow(final_universe_preservation_summary) > 0L) {
+  best_preservation <- final_universe_preservation_summary %>%
+    dplyr::arrange(
+      dplyr::desc(.data$median_jaccard),
+      dplyr::desc(.data$median_abs_eigengene_cor)
+    ) %>%
+    dplyr::slice_head(n = 1)
+
+  cat(
+    "The strongest overall cross-size module preservation occurred for the ",
+    format(best_preservation$reference_size, big.mark = ","),
+    " to ",
+    format(best_preservation$test_size, big.mark = ","),
+    " comparison (median Jaccard = ",
+    sprintf("%.3f", best_preservation$median_jaccard),
+    "; median absolute eigengene correlation = ",
+    sprintf("%.3f", best_preservation$median_abs_eigengene_cor),
+    ").\n\n",
+    sep = ""
+  )
+}
+
+cat(
+  "The 10,000-gene universe is selected from structural evidence: cross-universe preservation, site-stratified resampling stability, connectivity, assignment, and module-size behaviour. Annotation coverage is secondary. Site-contrast significance, DEG recovery, enrichment yield, and chemistry were excluded from selection. Within the 10,000-gene universe, power ",
+  final_selected_power,
+  " is the lowest candidate meeting the declared connectivity, scale-free-fit-deficit, and resampling-stability criteria. Step 08 consumes this explicit final-network handoff.\n",
+  sep = ""
+)
+```
+
+# 9. Save the lightweight comparison object
+
+```{r save-lightweight-object}
+lightweight_results <- list(
+  settings = list(
+    gene_set_sizes = gene_set_sizes,
+    candidate_powers = candidate_powers,
+    soft_threshold_target = soft_threshold_target,
+    reference_power_for_comparison = reference_power_for_comparison,
+    network_type = network_type,
+    correlation_type = correlation_type,
+    max_p_outliers = max_p_outliers,
+    minimum_module_size = minimum_module_size,
+    merge_cut_height = merge_cut_height,
+    deep_split = deep_split,
+    pam_respects_dendro = pam_respects_dendro,
+    max_block_size = max_block_size,
+    planned_contrasts = planned_contrasts
+  ),
+  network_summary = network_summary,
+  soft_threshold = soft_threshold_all,
+  module_summary = module_summary_all,
+  module_assignments = purrr::map(
+    network_results,
+    "assignment"
+  ),
+  eigengenes = purrr::map(
+    network_results,
+    "eigengenes"
+  ),
+  planned_contrasts = planned_contrasts_all,
+  module_preservation = module_preservation,
+  contrast_preservation = contrast_preservation,
+  annotation_coverage = network_gene_coverage,
+  deg_coverage = deg_coverage,
+  decision_dashboard = decision_dashboard
+  , power_selection = final_power_selection_table
+  , power_adjacent_preservation = power_adjacent_preservation
+  , power_resampling_stability = power_resampling_stability
+  , gene_universe_resampling_stability = gene_universe_resampling_stability
+  , final_power_module_preservation = final_universe_module_preservation
+  , final_power_preservation_summary = final_universe_preservation_summary
+)
+
+saveRDS(
+  lightweight_results,
+  file.path(
+    objects_dir,
+    "wgcna_gene_set_sensitivity_lightweight.rds"
+  ),
+  compress = "xz"
+)
+```
+
+# 10. Output inventory and session information
+
+```{r output-inventory}
+output_inventory <- tibble::tibble(
+  file = list.files(
+    results_dir,
+    recursive = TRUE,
+    full.names = TRUE
+  )
+) %>%
+  dplyr::mutate(
+    relative_path = stringr::str_remove(
+      .data$file,
+      paste0("^", stringr::fixed(results_dir), "/?")
+    ),
+    size_bytes = file.info(.data$file)$size
+  ) %>%
+  dplyr::select(
+    .data$relative_path,
+    .data$size_bytes
+  ) %>%
+  dplyr::arrange(.data$relative_path)
+
+write_csv_safe(
+  output_inventory,
+  file.path(tables_dir, "output_inventory.csv")
+)
+
+knitr::kable(
+  output_inventory,
+  caption = "Outputs generated by the WGCNA gene-set sensitivity report."
+)
+```
+
+```{r session-info}
+session_info_path <- file.path(logs_dir, "session_info.txt")
+writeLines(capture.output(sessionInfo()), session_info_path)
+sessionInfo()
+```
+

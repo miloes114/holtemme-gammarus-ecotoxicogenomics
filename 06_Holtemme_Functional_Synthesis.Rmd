@@ -1,0 +1,43 @@
+---
+title: "Holtemme functional synthesis"
+author: "Camilo Escobar"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+project_dir <- normalizePath(Sys.getenv("HOLTEMME_PROJECT_DIR", unset = getwd()), winslash = "/")
+root <- file.path(project_dir, "Results_06_Functional_Synthesis", "tables", "figure4_functional_landscape")
+read_tsv <- function(n) { p <- file.path(root, n); if (file.exists(p)) utils::read.delim(p, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE) else data.frame() }
+inventory <- read_tsv("figure4_semantic_feature_inventory.tsv")
+cells <- read_tsv("figure4_family_cell_provenance.tsv")
+assignments <- read_tsv("functional_family_reviewed_assignments.tsv")
+```
+
+# Functional evidence model
+
+Step 06 integrates target-supported GOseq evidence, matched-background
+annotation-context hypotheses, and default-domain exploratory hypotheses. Exact
+GO evidence is retained independently of semantic representability. RRvGO Rel
+reduction uses `org.Dm.eg.db` as the declared semantic proxy; obsolete terms
+without exact replacements and current terms unrepresented in the proxy are
+recorded separately.
+
+The final semantic inventory contains 248 integrated features: 120
+target-supported, 10 matched-background, and 118 default-domain exploratory.
+The reviewed family table is neutral and contains one row per integrated feature.
+
+```{r tables}
+if (nrow(assignments)) knitr::kable(utils::head(assignments, 20), caption = "Final reviewed family assignments (first 20 rows)")
+if (nrow(cells)) knitr::kable(utils::head(cells, 20), caption = "Figure 4 family-cell provenance (first 20 rows)")
+```
+
+# Publication outputs
+
+Figure 4 contains 101 displayed family cells with mutually exclusive
+compositions of 43 target-only, 18 target-plus-exploratory, one matched-only,
+four matched-plus-exploratory, and 35 exploratory-only cells. Evidence geometry
+is nested: outer total, middle target plus matched-background, inner target.
+There is no score or recurrence encoding. GO:0005509 in H7 versus H2 (MF) is
+assigned to “Small-molecule and cofactor binding” as default-domain exploratory
+evidence. The target-only S5 candidate-gene panel contains 16 genes.

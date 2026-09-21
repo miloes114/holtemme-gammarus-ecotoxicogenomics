@@ -1,0 +1,2989 @@
+---
+title: "Holtemme differential expression"
+author: "Camilo Escobar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+fontsize: 11pt
+geometry: margin=1in
+---
+
+# Overview
+
+This report evaluates differential expression along the Holtemme gradient and at WWTP-associated transitions in the *Gammarus pulex* study.
+
+The goal of this section is to identify how transcriptomic responses change along the river gradient and to determine which contrasts show the strongest evidence of transcriptional disruption. Using DESeq2 on a **gene-level Salmon estimated-count matrix aggregated in Galaxy and rounded for DESeq2 compatibility**, this report:
+
+1. compares each downstream site against the reference station HOL01,
+2. summarizes DEG burden, direction, and effect-size distributions across the gradient,
+3. evaluates shared versus site-specific transcriptional responses among downstream contrasts,
+4. focuses on local upstream–downstream contrasts around WWTP-associated transitions,
+5. ranks contrasts to help prioritize those most informative for pathway-level interpretation,
+6. uses volcano plots for clearer visual comparison of contrast structure,
+7. includes a DEG-based ordination as a **post hoc check** of the station organization observed previously in the full expression matrix,
+8. adds contrast-specific DEG heatmaps and full cluster-profile outputs to visualize the internal organization of each response.
+
+One biologically important point is that **`HOL02_vs_HOL01` belongs to both analytical frameworks**: it is simultaneously the first downstream-vs-reference comparison and a local upstream–downstream transition. In this updated version, such overlapping comparisons are **fit only once**, but they are **reported in both relevant summaries**.
+
+This report is designed to be **standalone, reproducible, and manuscript-oriented**, with all outputs written to an external results folder.
+
+# Biological rationale
+
+Global ordination can show whether transcriptomes differ among sites, but it does not identify where along the gradient these differences become strongest or how they are distributed across genes. Differential expression analysis is therefore the next step needed to quantify transcriptional disruption.
+
+In this section, we focus on two complementary types of comparisons:
+
+- **Reference-to-downstream contrasts**, which describe how each site differs from the least impacted condition.
+- **Local upstream–downstream contrasts**, which are especially useful for evaluating WWTP-associated transitions and identifying localized transcriptomic shifts.
+
+These are not fully independent reporting frameworks, because a biologically meaningful transition can belong to both. That is the case for `HOL02_vs_HOL01`, which marks both the first departure from the reference station and a local step along the river.
+
+Together, these analyses provide the empirical basis for deciding which contrasts should receive deeper functional and pathway-level interpretation later in the manuscript.
+
+# Analytical scope
+
+This script:
+
+- uses only the **German / Holtemme samples**
+- uses the **gene-level matrix built from Salmon abundance estimates**
+- rounds the estimated counts for compatibility with the local DESeq2 setup
+- runs **DESeq2** with site as the main factor
+- tests:
+  - all downstream sites against HOL01
+  - WWTP-relevant local upstream–downstream contrasts
+- summarizes:
+  - number of significant DEGs
+  - direction of change
+  - effect-size distributions
+  - shared versus unique DEGs
+  - pairwise overlap among contrasts
+  - contrast ranking for downstream interpretation
+- adds:
+  - volcano plots for communication and contrast comparison
+  - a DEG-based ordination as a secondary post hoc visualization
+  - contrast-specific DEG heatmaps
+  - clustered DEG profile PDFs and gene-list exports
+- uses **Trinotate_report.tsv** to add annotation-based labels for DEG tables and plots
+- exports a **Results 5 seed layer** containing GOseq-ready contrast universes and DEG vectors
+
+This script does **not**:
+
+- integrate chemistry
+- perform GO or pathway enrichment
+- assign mechanistic meaning to DEGs
+- treat the DEG-based ordination as an independent test of gradient structure
+
+# Input and output structure
+
+This report assumes it is run from the project home directory and uses the following inputs:
+
+- raw gene count matrix: `Galaxy434-[Build expression matrix on dataset 37 and 72-101_ estimated RNA-Seq fragment gene counts (raw counts)].tabular`
+- metadata file: `FORMAS_Metadata.xlsx`
+- annotation file: `Trinotate_report.tsv`
+
+All outputs are written to:
+
+- `Results_03_Differential_Expression/`
+  - `tables/`
+  - `plots/`
+  - `contrast_tables/`
+  - `contrast_plots/`
+  - `matrices/`
+  - `logs/`
+  - `results5_seeds/`
+    - `contrast_seed_tables/`
+    - `contrast_gene_lists/`
+    - `manifests/`
+
+# 0. Setup and configuration
+
+This section loads packages, defines paths, and centralizes all adjustable analysis parameters.
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(stringsAsFactors = FALSE)
+
+required_pkgs <- c(
+  "DESeq2",
+  "SummarizedExperiment",
+  "EnhancedVolcano",
+  "ggplot2",
+  "ggrepel",
+  "pheatmap",
+  "readxl",
+  "tibble",
+  "readr",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "purrr"
+)
+
+missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_pkgs, collapse = ", "),
+    "\nPlease install them before running this report."
+  )
+}
+
+for (p in required_pkgs) {
+  suppressPackageStartupMessages(library(p, character.only = TRUE))
+}
+
+project_dir <- getwd()
+source(file.path(project_dir, "support", "workflow_helpers.R"))
+sync_rstudio_pandoc()
+label_bundle <- get_publication_labels(project_dir)
+station_crosswalk <- label_bundle$station_tbl
+contrast_crosswalk <- label_bundle$contrast_tbl
+site_tag_map <- label_bundle$site_label_map
+contrast_label_map <- label_bundle$contrast_label_map
+
+count_file <- file.path(project_dir, "02_inputs", "counts_raw_gene_level.tabular")
+metadata_file <- file.path(project_dir, "01_metadata", "FORMAS_Metadata.xlsx")
+trinotate_file <- file.path(project_dir, "03_reference", "Trinotate_report.tsv")
+trinotate_gene_cache_file <- file.path(
+  project_dir,
+  "03_reference",
+  "Trinotate_gene_annotation_collapsed.csv"
+)
+
+results_dir <- make_results_dir(project_dir, 3, "Differential_Expression")
+
+plots_dir           <- file.path(results_dir, "plots")
+tables_dir          <- file.path(results_dir, "tables")
+matrices_dir        <- file.path(results_dir, "matrices")
+logs_dir            <- file.path(results_dir, "logs")
+contrast_tables_dir <- file.path(results_dir, "contrast_tables")
+contrast_plots_dir  <- file.path(results_dir, "contrast_plots")
+
+# New: seed layer for Results 5 / GOseq
+results5_seed_dir   <- file.path(results_dir, "results5_seeds")
+seed_tables_dir     <- file.path(results5_seed_dir, "contrast_seed_tables")
+seed_lists_dir      <- file.path(results5_seed_dir, "contrast_gene_lists")
+seed_manifests_dir  <- file.path(results5_seed_dir, "manifests")
+
+for (d in c(
+  results_dir,
+  plots_dir,
+  tables_dir,
+  matrices_dir,
+  logs_dir,
+  contrast_tables_dir,
+  contrast_plots_dir,
+  results5_seed_dir,
+  seed_tables_dir,
+  seed_lists_dir,
+  seed_manifests_dir
+)) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+
+# Analysis parameters
+country_keep <- "Germany"
+site_levels  <- label_bundle$site_levels_legacy
+reference_site <- get_reference_site_id(project_dir, "H2")
+
+# DE settings
+min_count <- 10
+min_samples <- 3
+alpha_padj <- 0.05
+lfc_sig_threshold <- 1
+
+# DEG visualization / clustering settings
+max_deg_pattern_genes <- 1000
+max_heatmap_display_genes <- 300
+ptree_percent <- 60
+ntop_deg_heatmap <- 500
+
+# Fallback WWTP-associated local contrasts if auto-detection fails
+# These define the local transitions H2->H3 and H5->H6,
+# represented internally as HOL02_vs_HOL01 and HOL05_vs_HOL04.
+fallback_local_pairs <- data.frame(
+  upstream = c("HOL01", "HOL04"),
+  downstream = c("HOL02", "HOL05"),
+  stringsAsFactors = FALSE
+)
+
+plot_dpi <- 300
+plot_width <- 8
+plot_height <- 6
+label_points <- TRUE
+```
+
+# 1. Helper functions
+
+These helper functions keep repetitive tasks standardized and make the workflow easier to maintain.
+
+```{r helper_functions}
+standardize_ids <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("\\s+", "_", x)
+  x <- gsub("-", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "", x)
+  x
+}
+
+save_plot_dual <- function(plot_obj, outdir, filename_stub, width = 8, height = 6, dpi = 300) {
+  ggplot2::ggsave(
+    filename = file.path(outdir, paste0(filename_stub, ".png")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+  ggplot2::ggsave(
+    filename = file.path(outdir, paste0(filename_stub, ".pdf")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+}
+
+write_table_safe <- function(df, outdir, filename) {
+  readr::write_csv(df, file.path(outdir, filename))
+}
+
+write_lines_safe <- function(x, outfile) {
+  readr::write_lines(as.character(x), outfile)
+}
+
+export_results5_seed_files <- function(res_df, contrast_label, outdir_tables, outdir_lists) {
+  tested_df <- res_df %>%
+    dplyr::filter(!is.na(pvalue)) %>%
+    dplyr::mutate(
+      de_flag = as.integer(significant),
+      up_flag = as.integer(direction == "up_in_numerator"),
+      down_flag = as.integer(direction == "down_in_numerator")
+    )
+
+  universe_df <- tested_df %>%
+    dplyr::transmute(
+      gene_id,
+      tested_in_deseq2 = 1L
+    )
+
+  gene_vector_df <- tested_df %>%
+    dplyr::transmute(
+      gene_id,
+      de_flag
+    )
+
+  up_vector_df <- tested_df %>%
+    dplyr::transmute(
+      gene_id,
+      de_flag = up_flag
+    )
+
+  down_vector_df <- tested_df %>%
+    dplyr::transmute(
+      gene_id,
+      de_flag = down_flag
+    )
+
+  ready_df <- tested_df %>%
+    dplyr::select(dplyr::any_of(c(
+      "gene_id",
+      "contrast",
+      "numerator",
+      "denominator",
+      "comparison_class",
+      "is_reference_contrast",
+      "is_local_contrast",
+      "significant",
+      "direction",
+      "de_flag",
+      "up_flag",
+      "down_flag",
+      "baseMean",
+      "log2FoldChange",
+      "lfcSE",
+      "stat",
+      "pvalue",
+      "padj",
+      "log2FoldChange_shrunk",
+      "lfcSE_shrunk",
+      "gene_label",
+      "EggNM.Preferred_name",
+      "EggNM.Description",
+      "EggNM.max_annot_lvl"
+    )))
+
+  write_table_safe(universe_df, outdir_tables, paste0(contrast_label, "_tested_universe.csv"))
+  write_table_safe(gene_vector_df, outdir_tables, paste0(contrast_label, "_goseq_gene_vector.csv"))
+  write_table_safe(up_vector_df, outdir_tables, paste0(contrast_label, "_goseq_up_gene_vector.csv"))
+  write_table_safe(down_vector_df, outdir_tables, paste0(contrast_label, "_goseq_down_gene_vector.csv"))
+  write_table_safe(ready_df, outdir_tables, paste0(contrast_label, "_goseq_ready_table.csv"))
+
+  write_lines_safe(
+    tested_df$gene_id,
+    file.path(outdir_lists, paste0(contrast_label, "_tested_universe_gene_ids.txt"))
+  )
+  write_lines_safe(
+    tested_df$gene_id[tested_df$de_flag == 1],
+    file.path(outdir_lists, paste0(contrast_label, "_sig_gene_ids.txt"))
+  )
+  write_lines_safe(
+    tested_df$gene_id[tested_df$up_flag == 1],
+    file.path(outdir_lists, paste0(contrast_label, "_up_gene_ids.txt"))
+  )
+  write_lines_safe(
+    tested_df$gene_id[tested_df$down_flag == 1],
+    file.path(outdir_lists, paste0(contrast_label, "_down_gene_ids.txt"))
+  )
+
+  data.frame(
+    contrast = unique(tested_df$contrast),
+    numerator = unique(tested_df$numerator),
+    denominator = unique(tested_df$denominator),
+    comparison_class = unique(tested_df$comparison_class),
+    is_reference_contrast = unique(tested_df$is_reference_contrast),
+    is_local_contrast = unique(tested_df$is_local_contrast),
+    n_tested_genes = nrow(tested_df),
+    n_sig_genes = sum(tested_df$de_flag, na.rm = TRUE),
+    n_up_genes = sum(tested_df$up_flag, na.rm = TRUE),
+    n_down_genes = sum(tested_df$down_flag, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  )
+}
+
+first_informative <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- x[!is.na(x) & x != "" & x != "." & x != "-"]
+  if (length(x) == 0) NA_character_ else x[1]
+}
+
+safe_median <- function(x) {
+  if (all(is.na(x)) || length(stats::na.omit(x)) == 0) return(NA_real_)
+  stats::median(x, na.rm = TRUE)
+}
+
+safe_max <- function(x) {
+  if (all(is.na(x)) || length(stats::na.omit(x)) == 0) return(NA_real_)
+  max(x, na.rm = TRUE)
+}
+
+safe_quantile <- function(x, prob = 0.9) {
+  if (all(is.na(x)) || length(stats::na.omit(x)) == 0) return(NA_real_)
+  as.numeric(stats::quantile(x, probs = prob, na.rm = TRUE))
+}
+
+get_contrast_dirs <- function(contrast_label) {
+  tbl_dir <- file.path(contrast_tables_dir, contrast_label)
+  plt_dir <- file.path(contrast_plots_dir, contrast_label)
+  if (!dir.exists(tbl_dir)) dir.create(tbl_dir, recursive = TRUE)
+  if (!dir.exists(plt_dir)) dir.create(plt_dir, recursive = TRUE)
+  list(tables = tbl_dir, plots = plt_dir)
+}
+
+compute_jaccard_matrix <- function(sig_gene_list) {
+  contrast_names <- names(sig_gene_list)
+  out <- matrix(NA_real_, nrow = length(contrast_names), ncol = length(contrast_names))
+  rownames(out) <- contrast_names
+  colnames(out) <- contrast_names
+
+  for (i in seq_along(contrast_names)) {
+    for (j in seq_along(contrast_names)) {
+      a <- sig_gene_list[[i]]
+      b <- sig_gene_list[[j]]
+      denom <- length(union(a, b))
+      if (denom == 0) {
+        out[i, j] <- NA_real_
+      } else {
+        out[i, j] <- length(intersect(a, b)) / denom
+      }
+    }
+  }
+
+  out
+}
+
+extract_deseq_contrast <- function(dds, numerator, denominator, annotation_df, alpha = 0.05, lfc_sig = 1) {
+  contrast_vec <- c("site", numerator, denominator)
+
+  res_raw <- DESeq2::results(
+    dds,
+    contrast = contrast_vec,
+    alpha = alpha,
+    independentFiltering = TRUE
+  )
+
+  res_shr <- DESeq2::lfcShrink(
+    dds,
+    contrast = contrast_vec,
+    res = res_raw,
+    type = "normal"
+  )
+
+  res_df <- as.data.frame(res_raw) %>%
+    tibble::rownames_to_column("gene_id")
+
+  shr_df <- as.data.frame(res_shr) %>%
+    tibble::rownames_to_column("gene_id") %>%
+    dplyr::select(gene_id, log2FoldChange, lfcSE)
+
+  colnames(shr_df)[colnames(shr_df) == "log2FoldChange"] <- "log2FoldChange_shrunk"
+  colnames(shr_df)[colnames(shr_df) == "lfcSE"] <- "lfcSE_shrunk"
+
+  res_df <- dplyr::left_join(res_df, shr_df, by = "gene_id") %>%
+    dplyr::left_join(annotation_df, by = "gene_id") %>%
+    dplyr::mutate(
+      contrast = paste0(numerator, "_vs_", denominator),
+      numerator = numerator,
+      denominator = denominator,
+      sig_padj = !is.na(padj) & padj < alpha,
+      sig_lfc = !is.na(log2FoldChange_shrunk) & abs(log2FoldChange_shrunk) >= lfc_sig,
+      significant = sig_padj & sig_lfc,
+      direction = dplyr::case_when(
+        significant & log2FoldChange_shrunk > 0 ~ "up_in_numerator",
+        significant & log2FoldChange_shrunk < 0 ~ "down_in_numerator",
+        TRUE ~ "not_significant"
+      )
+    )
+
+  res_df
+}
+
+summarize_contrast <- function(res_df, comparison_class) {
+  sig_df <- res_df %>% dplyr::filter(significant)
+
+  data.frame(
+    contrast = unique(res_df$contrast),
+    numerator = unique(res_df$numerator),
+    denominator = unique(res_df$denominator),
+    comparison_class = comparison_class,
+    n_genes_tested = sum(!is.na(res_df$pvalue)),
+    n_significant = sum(res_df$significant, na.rm = TRUE),
+    n_up_in_numerator = sum(res_df$direction == "up_in_numerator", na.rm = TRUE),
+    n_down_in_numerator = sum(res_df$direction == "down_in_numerator", na.rm = TRUE),
+    median_abs_lfc_sig = safe_median(abs(sig_df$log2FoldChange_shrunk)),
+    q90_abs_lfc_sig = safe_quantile(abs(sig_df$log2FoldChange_shrunk), prob = 0.9),
+    max_abs_lfc_sig = safe_max(abs(sig_df$log2FoldChange_shrunk)),
+    median_baseMean_sig = safe_median(sig_df$baseMean),
+    stringsAsFactors = FALSE
+  )
+}
+
+make_ma_plot <- function(res_df, title_text, lfc_line = 1) {
+  plot_df <- res_df %>%
+    dplyr::mutate(
+      plot_sig = ifelse(significant, "significant", "not_significant"),
+      baseMean_plot = ifelse(is.na(baseMean) | baseMean <= 0, NA, baseMean)
+    )
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = baseMean_plot, y = log2FoldChange_shrunk, colour = plot_sig)) +
+    ggplot2::geom_point(alpha = 0.5, size = 1) +
+    ggplot2::scale_x_log10() +
+    ggplot2::geom_hline(yintercept = c(-lfc_line, 0, lfc_line), linetype = c("dashed", "solid", "dashed")) +
+    ggplot2::labs(
+      title = title_text,
+      x = "Mean normalized expression (baseMean, log scale)",
+      y = "Shrunken log2 fold change",
+      colour = NULL
+    ) +
+    ggplot2::theme_bw()
+}
+
+make_volcano_plot <- function(
+    res_df,
+    title_text,
+    alpha = 0.05,
+    lfc_cutoff = 1,
+    max_labels = 12
+) {
+  plot_df <- res_df %>%
+    dplyr::mutate(
+      plot_padj = dplyr::case_when(
+        is.na(padj) ~ 1,
+        padj <= 0 ~ .Machine$double.xmin,
+        TRUE ~ padj
+      ),
+      label_score = dplyr::if_else(
+        significant,
+        abs(log2FoldChange_shrunk) * -log10(plot_padj),
+        0
+      )
+    )
+
+  select_labels <- plot_df %>%
+    dplyr::filter(significant) %>%
+    dplyr::arrange(dplyr::desc(label_score)) %>%
+    dplyr::slice_head(n = max_labels) %>%
+    dplyr::pull(gene_label)
+
+  select_labels <- select_labels[!is.na(select_labels)]
+
+  EnhancedVolcano::EnhancedVolcano(
+    plot_df,
+    lab = ifelse(is.na(plot_df$gene_label), plot_df$gene_id, plot_df$gene_label),
+    selectLab = select_labels,
+    x = "log2FoldChange_shrunk",
+    y = "plot_padj",
+    title = title_text,
+    subtitle = paste0("padj < ", alpha, "; |log2FC| >= ", lfc_cutoff),
+    pCutoff = alpha,
+    FCcutoff = lfc_cutoff,
+    pointSize = 1.6,
+    labSize = 3.0,
+    colAlpha = 0.8,
+    drawConnectors = TRUE,
+    widthConnectors = 0.3,
+    boxedLabels = FALSE,
+    legendPosition = "right",
+    legendLabSize = 10,
+    legendIconSize = 3.0,
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    border = "full",
+    borderWidth = 0.7
+  )
+}
+
+prepare_contrast_pattern_data <- function(
+    res_df,
+    vst_mat,
+    meta_df,
+    numerator,
+    denominator,
+    max_pattern_genes = 1000
+) {
+  sig_df <- res_df %>%
+    dplyr::filter(significant) %>%
+    dplyr::arrange(padj, dplyr::desc(abs(log2FoldChange_shrunk)))
+
+  if (nrow(sig_df) == 0) return(NULL)
+
+  if (nrow(sig_df) > max_pattern_genes) {
+    sig_df <- sig_df %>% dplyr::slice_head(n = max_pattern_genes)
+  }
+
+  genes_use <- intersect(sig_df$gene_id, rownames(vst_mat))
+  if (length(genes_use) == 0) return(NULL)
+
+  meta_sub <- meta_df %>%
+    dplyr::filter(site %in% c(denominator, numerator)) %>%
+    dplyr::mutate(site = factor(site, levels = c(denominator, numerator)))
+
+  samples_use <- meta_sub$sample
+  expr_mat <- vst_mat[genes_use, samples_use, drop = FALSE]
+  expr_mat <- expr_mat[match(genes_use, rownames(expr_mat)), , drop = FALSE]
+
+  z_mat <- t(scale(t(expr_mat), center = TRUE, scale = TRUE))
+  keep_rows <- rowSums(is.na(z_mat)) == 0
+  z_mat <- z_mat[keep_rows, , drop = FALSE]
+  expr_mat <- expr_mat[rownames(z_mat), , drop = FALSE]
+  sig_df <- sig_df %>% dplyr::filter(gene_id %in% rownames(z_mat))
+
+  ann_col <- data.frame(site = meta_sub$site)
+  rownames(ann_col) <- meta_sub$sample
+
+  list(
+    expr_mat = expr_mat,
+    z_mat = z_mat,
+    ann_col = ann_col,
+    meta_sub = meta_sub,
+    sig_df = sig_df
+  )
+}
+
+plot_contrast_deg_heatmap <- function(pattern_obj, contrast_label, outdir, max_display_genes = 300) {
+  if (is.null(pattern_obj)) return(NULL)
+
+  sig_df <- pattern_obj$sig_df
+  z_mat <- pattern_obj$z_mat
+  ann_col <- pattern_obj$ann_col
+
+  genes_display <- sig_df %>%
+    dplyr::arrange(padj, dplyr::desc(abs(log2FoldChange_shrunk))) %>%
+    dplyr::slice_head(n = min(max_display_genes, nrow(sig_df))) %>%
+    dplyr::pull(gene_id)
+
+  z_plot <- z_mat[genes_display, , drop = FALSE]
+
+  pheatmap::pheatmap(
+    z_plot,
+    scale = "none",
+    show_rownames = FALSE,
+    annotation_col = ann_col,
+    clustering_method = "complete",
+    main = paste0(
+      "DEG heatmap: ", contrast_label, "\n",
+      "top ", nrow(z_plot), " significant genes (z-scored VST)"
+    )
+  )
+
+  pheatmap::pheatmap(
+    z_plot,
+    scale = "none",
+    show_rownames = FALSE,
+    annotation_col = ann_col,
+    clustering_method = "complete",
+    main = paste0(
+      "DEG heatmap: ", contrast_label, "\n",
+      "top ", nrow(z_plot), " significant genes (z-scored VST)"
+    ),
+    filename = file.path(outdir, paste0("Heatmap_", contrast_label, "_DEGs.png")),
+    width = 8,
+    height = 10
+  )
+
+  pdf(file.path(outdir, paste0("Heatmap_", contrast_label, "_DEGs.pdf")), width = 8, height = 10)
+  pheatmap::pheatmap(
+    z_plot,
+    scale = "none",
+    show_rownames = FALSE,
+    annotation_col = ann_col,
+    clustering_method = "complete",
+    main = paste0(
+      "DEG heatmap: ", contrast_label, "\n",
+      "top ", nrow(z_plot), " significant genes (z-scored VST)"
+    )
+  )
+  dev.off()
+
+  invisible(z_plot)
+}
+
+cluster_and_export_profiles <- function(
+    pattern_obj,
+    contrast_label,
+    numerator,
+    denominator,
+    outdir_tables,
+    outdir_plots,
+    annotation_df,
+    ptree = 60
+) {
+  if (is.null(pattern_obj)) return(NULL)
+
+  expr_mat <- pattern_obj$expr_mat
+  z_mat <- pattern_obj$z_mat
+  meta_sub <- pattern_obj$meta_sub
+
+  if (nrow(z_mat) == 0) return(NULL)
+
+  if (nrow(z_mat) == 1L) {
+    cluster_assign <- setNames(1L, rownames(z_mat))
+  } else {
+    row_dist <- stats::dist(z_mat, method = "euclidean")
+    row_hclust <- stats::hclust(row_dist, method = "complete")
+    h_cut <- (ptree / 100) * max(row_hclust$height)
+    cluster_assign <- stats::cutree(row_hclust, h = h_cut)
+  }
+
+  cluster_df <- data.frame(
+    gene_id = names(cluster_assign),
+    cluster = as.integer(cluster_assign),
+    stringsAsFactors = FALSE
+  ) %>%
+    dplyr::left_join(annotation_df, by = "gene_id") %>%
+    dplyr::arrange(cluster, gene_id)
+
+  write_table_safe(
+    cluster_df,
+    outdir_tables,
+    paste0("DEG_clusters_", contrast_label, ".csv")
+  )
+
+  centered_expr <- t(scale(t(expr_mat), center = TRUE, scale = FALSE))
+
+  for (k in sort(unique(cluster_df$cluster))) {
+    genes_k <- cluster_df$gene_id[cluster_df$cluster == k]
+
+    gene_file <- cluster_df %>%
+      dplyr::filter(cluster == k)
+
+    write_table_safe(
+      gene_file,
+      outdir_tables,
+      paste0("DEG_cluster_", k, "_", contrast_label, "_genes.csv")
+    )
+
+    mat_k <- centered_expr[genes_k, , drop = FALSE]
+    mat_export <- cbind(
+      data.frame(gene_id = rownames(mat_k), stringsAsFactors = FALSE),
+      as.data.frame(mat_k, check.names = FALSE)
+    ) %>%
+      dplyr::left_join(annotation_df, by = "gene_id") %>%
+      dplyr::select(gene_id, gene_label, EggNM.Preferred_name, EggNM.Description, dplyr::everything())
+
+    write_table_safe(
+      mat_export,
+      outdir_tables,
+      paste0("cluster_", k, "_", contrast_label, "_medianCentered_VST.csv")
+    )
+  }
+
+  pdf_file <- file.path(outdir_plots, paste0("cluster_profiles_", contrast_label, ".pdf"))
+  grDevices::pdf(pdf_file, width = 8, height = 8)
+  old_par <- par(no.readonly = TRUE)
+  on.exit({
+    par(old_par)
+    dev.off()
+  }, add = TRUE)
+
+  par(mfrow = c(2, 2))
+
+  group_cols <- c(
+    HOL01 = "#F0E442",
+    HOL02 = "#56B4E9",
+    HOL03 = "#D55E00",
+    HOL04 = "#009E73",
+    HOL05 = "#CC79A7",
+    HOL06 = "#999999"
+  )
+
+  sample_order <- order(factor(meta_sub$site, levels = c(denominator, numerator)), meta_sub$sample)
+  ordered_samples <- meta_sub$sample[sample_order]
+  ordered_sites <- as.character(meta_sub$site[sample_order])
+
+  cluster_summary_list <- list()
+
+  for (k in sort(unique(cluster_df$cluster))) {
+    genes_k <- cluster_df$gene_id[cluster_df$cluster == k]
+    mat_k <- centered_expr[genes_k, ordered_samples, drop = FALSE]
+
+    y_range <- range(mat_k, finite = TRUE)
+    y_range <- y_range + c(-0.2, 0.2)
+
+    vals_den <- rowMeans(mat_k[, ordered_sites == denominator, drop = FALSE], na.rm = TRUE)
+    vals_num <- rowMeans(mat_k[, ordered_sites == numerator, drop = FALSE], na.rm = TRUE)
+
+    mean_den <- mean(vals_den, na.rm = TRUE)
+    mean_num <- mean(vals_num, na.rm = TRUE)
+    fold_change_centered <- mean_num - mean_den
+
+    t_stat <- NA_real_
+    p_value <- NA_real_
+    cohens_d <- NA_real_
+
+    if (length(vals_den) > 1 && length(vals_num) > 1) {
+      tt <- try(stats::t.test(vals_num, vals_den), silent = TRUE)
+      if (!inherits(tt, "try-error")) {
+        t_stat <- unname(tt$statistic)
+        p_value <- tt$p.value
+      }
+
+      sd_num <- stats::sd(vals_num, na.rm = TRUE)
+      sd_den <- stats::sd(vals_den, na.rm = TRUE)
+      pooled_sd <- sqrt((sd_num^2 + sd_den^2) / 2)
+      if (!is.na(pooled_sd) && pooled_sd > 0) {
+        cohens_d <- (mean_num - mean_den) / pooled_sd
+      }
+    }
+
+    fc_str <- if (is.na(fold_change_centered)) "FC=NA" else sprintf("FC=%.2f", fold_change_centered)
+    d_str  <- if (is.na(cohens_d)) "d=NA" else sprintf("d=%.2f", cohens_d)
+    p_str  <- if (is.na(p_value)) "p=NA" else paste0("p=", signif(p_value, 2))
+
+    plot(
+      x = seq_along(ordered_samples),
+      y = rep(0, length(ordered_samples)),
+      type = "n",
+      xaxt = "n",
+      xlab = "",
+      ylab = "median-centered VST",
+      ylim = y_range,
+      main = paste0(
+        "DEG_cluster_", k, "_", contrast_label, "\n(",
+        length(genes_k), " genes; ", fc_str, ", ", d_str, ", ", p_str, ")"
+      )
+    )
+
+    for (j in seq_along(ordered_samples)) {
+      g <- ordered_sites[j]
+      if (!is.na(g) && g %in% names(group_cols)) {
+        rect(
+          j - 0.5, y_range[1], j + 0.5, y_range[2],
+          col = grDevices::adjustcolor(group_cols[g], alpha.f = 0.18),
+          border = NA
+        )
+      }
+    }
+
+    axis(1, at = seq_along(ordered_samples), labels = ordered_samples, las = 2, cex.axis = 0.7)
+
+    apply(mat_k, 1, function(v) {
+      lines(seq_along(ordered_samples), v, col = grDevices::adjustcolor("grey70", alpha.f = 0.6))
+    })
+
+    cluster_mean <- colMeans(mat_k, na.rm = TRUE)
+    lines(seq_along(ordered_samples), cluster_mean, col = "blue", lwd = 2)
+    points(seq_along(ordered_samples), cluster_mean, col = "blue", pch = 16)
+
+    used_groups <- unique(ordered_sites)
+    used_groups <- used_groups[used_groups %in% names(group_cols)]
+    if (length(used_groups) > 0) {
+      legend(
+        "topleft",
+        legend = used_groups,
+        fill = grDevices::adjustcolor(group_cols[used_groups], alpha.f = 0.5),
+        border = NA,
+        bty = "n",
+        cex = 0.7
+      )
+    }
+
+    cluster_summary_list[[length(cluster_summary_list) + 1]] <- data.frame(
+      contrast = contrast_label,
+      numerator = numerator,
+      denominator = denominator,
+      cluster = k,
+      n_genes = length(genes_k),
+      mean_denominator = mean_den,
+      mean_numerator = mean_num,
+      fold_change_centered = fold_change_centered,
+      t_stat = t_stat,
+      p_value = p_value,
+      cohens_d = cohens_d,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  cluster_summary <- dplyr::bind_rows(cluster_summary_list)
+  write_table_safe(
+    cluster_summary,
+    outdir_tables,
+    paste0("cluster_summary_", contrast_label, ".csv")
+  )
+
+  invisible(list(cluster_df = cluster_df, cluster_summary = cluster_summary))
+}
+```
+
+# 2. Load raw count matrix
+
+We start from the gene-level count matrix so that DESeq2 can model count variance appropriately.
+
+Because this matrix was built from **Salmon abundance estimates**, it may contain **non-integer estimated counts** rather than literal integer read counts. For compatibility with the local DESeq2 installation, the matrix is rounded to integers before model fitting. The original matrix is still checked to ensure it is numeric, non-negative, and free of missing values.
+
+```{r load_counts}
+counts_df <- utils::read.delim(count_file, check.names = FALSE)
+colnames(counts_df)[1] <- "gene_id"
+counts_df$gene_id <- standardize_ids(counts_df$gene_id)
+counts_df <- counts_df[!duplicated(counts_df$gene_id), , drop = FALSE]
+rownames(counts_df) <- counts_df$gene_id
+counts_df$gene_id <- NULL
+
+counts_mat <- as.matrix(counts_df)
+storage.mode(counts_mat) <- "numeric"
+colnames(counts_mat) <- standardize_ids(colnames(counts_mat))
+
+counts_mat <- counts_mat[rowSums(counts_mat, na.rm = TRUE) > 0, , drop = FALSE]
+
+if (any(is.na(counts_mat))) {
+  stop("The selected count matrix contains NA values. Please verify the DESeq2 input file.")
+}
+
+if (any(counts_mat < 0, na.rm = TRUE)) {
+  stop("The selected count matrix contains negative values. Please verify the DESeq2 input file.")
+}
+
+is_integer_like <- all(abs(counts_mat - round(counts_mat)) < 1e-8, na.rm = TRUE)
+
+counts_mat_rounded <- round(counts_mat)
+storage.mode(counts_mat_rounded) <- "integer"
+
+rounding_summary <- data.frame(
+  metric = c(
+    "n_genes",
+    "n_samples",
+    "integer_like_before_rounding",
+    "max_abs_rounding_difference"
+  ),
+  value = c(
+    nrow(counts_mat),
+    ncol(counts_mat),
+    is_integer_like,
+    max(abs(counts_mat - counts_mat_rounded), na.rm = TRUE)
+  ),
+  stringsAsFactors = FALSE
+)
+
+write_table_safe(rounding_summary, tables_dir, "count_input_rounding_summary.csv")
+
+cat("Count matrix dimensions:\n")
+cat("  Genes:", nrow(counts_mat), "\n")
+cat("  Samples:", ncol(counts_mat), "\n")
+cat("  Integer-like before rounding:", is_integer_like, "\n")
+cat("  Max absolute rounding difference:", max(abs(counts_mat - counts_mat_rounded), na.rm = TRUE), "\n")
+```
+
+# 3. Load gene annotation from Trinotate
+
+To make the DEG outputs more interpretable, we load a minimal set of annotation columns from `Trinotate_report.tsv`. Because the expression matrix is gene-level, annotation is joined by **`gene_id`**.
+
+If multiple transcripts share the same gene ID in the Trinotate file, annotation is collapsed to one row per gene using the first informative value available.
+
+```{r load_annotation}
+if (file.exists(trinotate_gene_cache_file)) {
+  annotation_gene <- readr::read_csv(
+    trinotate_gene_cache_file,
+    show_col_types = FALSE
+  )
+  required_annotation_columns <- c(
+    "gene_id",
+    "EggNM.Preferred_name",
+    "EggNM.Description",
+    "EggNM.max_annot_lvl",
+    "gene_label"
+  )
+  missing_annotation_columns <- setdiff(
+    required_annotation_columns,
+    colnames(annotation_gene)
+  )
+  if (length(missing_annotation_columns)) {
+    stop(
+      "The bundled gene-level Trinotate cache is missing columns: ",
+      paste(missing_annotation_columns, collapse = ", ")
+    )
+  }
+  annotation_gene <- annotation_gene %>%
+    dplyr::mutate(gene_id = standardize_ids(gene_id)) %>%
+    dplyr::distinct(gene_id, .keep_all = TRUE)
+  annotation_source <- "bundled deterministic gene-level Trinotate collapse"
+} else {
+  trinotate_raw <- readr::read_tsv(
+    trinotate_file,
+    col_select = c(
+      "#gene_id",
+      "EggNM.Preferred_name",
+      "EggNM.Description",
+      "EggNM.max_annot_lvl"
+    ),
+    show_col_types = FALSE
+  )
+
+  colnames(trinotate_raw) <- c(
+    "gene_id",
+    "EggNM.Preferred_name",
+    "EggNM.Description",
+    "EggNM.max_annot_lvl"
+  )
+
+  annotation_gene <- trinotate_raw %>%
+    dplyr::mutate(gene_id = standardize_ids(gene_id)) %>%
+    dplyr::group_by(gene_id) %>%
+    dplyr::summarise(
+      EggNM.Preferred_name = first_informative(EggNM.Preferred_name),
+      EggNM.Description = first_informative(EggNM.Description),
+      EggNM.max_annot_lvl = first_informative(EggNM.max_annot_lvl),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      gene_label = dplyr::if_else(
+        !is.na(EggNM.Preferred_name),
+        EggNM.Preferred_name,
+        gene_id
+      )
+    )
+  annotation_source <- "Trinotate report collapsed during this render"
+}
+
+if (anyDuplicated(annotation_gene$gene_id)) {
+  stop("Gene-level Trinotate annotation contains duplicated gene IDs.")
+}
+
+cat("Annotation source:", annotation_source, "\n")
+
+write_table_safe(annotation_gene, tables_dir, "gene_annotation_collapsed_from_trinotate.csv")
+
+knitr::kable(
+  head(annotation_gene, 10),
+  caption = "Collapsed gene-level annotation from Trinotate.",
+  row.names = FALSE
+)
+```
+
+# 4. Load metadata and subset to German / Holtemme samples
+
+Only German Holtemme samples are retained for this report. This keeps the differential expression analysis aligned with the river-gradient framework used in the manuscript.
+
+```{r load_metadata}
+meta_raw <- readxl::read_excel(metadata_file)
+meta_raw <- as.data.frame(meta_raw)
+
+required_cols <- c("sample_code", "sampling_sites", "site_id", "country", "site_type")
+missing_cols <- setdiff(required_cols, colnames(meta_raw))
+if (length(missing_cols) > 0) {
+  stop("Metadata is missing required columns: ", paste(missing_cols, collapse = ", "))
+}
+
+meta_raw$sample_code    <- standardize_ids(meta_raw$sample_code)
+meta_raw$site_id        <- standardize_ids(meta_raw$site_id)
+meta_raw$sampling_sites <- as.character(meta_raw$sampling_sites)
+meta_raw$site_type      <- as.character(meta_raw$site_type)
+meta_raw$country        <- as.character(meta_raw$country)
+
+meta_de <- meta_raw %>%
+  dplyr::filter(country == country_keep) %>%
+  dplyr::left_join(station_crosswalk, by = c("site_id" = "legacy_site_id")) %>%
+  dplyr::distinct(sample_code, .keep_all = TRUE)
+
+cat("Metadata rows retained for Germany:", nrow(meta_de), "\n")
+```
+
+# 5. Match metadata and count matrix
+
+Sample matching is critical before DESeq2 analysis. The count matrix and metadata must refer to exactly the same samples in the same order.
+
+```{r match_counts_metadata}
+common_samples <- intersect(colnames(counts_mat_rounded), meta_de$sample_code)
+
+if (length(common_samples) == 0) {
+  stop("No overlapping German sample IDs were found between the count matrix and metadata.")
+}
+
+counts_mat_rounded <- counts_mat_rounded[, common_samples, drop = FALSE]
+meta <- meta_de[match(common_samples, meta_de$sample_code), , drop = FALSE]
+rownames(meta) <- meta$sample_code
+
+site_levels_present <- site_levels[site_levels %in% unique(meta$site_id)]
+
+meta$sample <- meta$sample_code
+meta$site <- factor(meta$site_id, levels = site_levels_present)
+meta$site_tag <- factor(unname(site_tag_map[as.character(meta$site_id)]), levels = station_crosswalk$station_tag)
+meta$short_name <- meta$sample_code
+
+stopifnot(identical(colnames(counts_mat_rounded), meta$sample))
+
+cat("Matched German dataset:\n")
+cat("  Samples in expression matrix:", ncol(counts_mat_rounded), "\n")
+cat("  Sites represented:", length(unique(meta$site)), "\n")
+
+write_table_safe(meta, tables_dir, "metadata_matched_germany.csv")
+write_table_safe(meta, seed_manifests_dir, "results4_sample_manifest.csv")
+```
+
+# 6. Site composition and candidate contrast framework
+
+Before running DESeq2, we summarize the site structure and define the contrasts that will be tested. The main downstream-vs-reference contrasts are all sites relative to HOL01. Local WWTP-associated contrasts are either auto-detected from `site_type` or taken from the fallback pairs defined at the top of the script.
+
+A key design feature in this updated version is that **contrast identity and reporting framework are treated separately**. This avoids double-counting or accidental overwriting when the same biological comparison belongs to both the reference and local contrast sets.
+
+```{r define_contrasts}
+site_info <- meta %>%
+  dplyr::select(site, site_tag, sampling_sites, site_type) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(site)
+
+write_table_safe(site_info, tables_dir, "site_info.csv")
+
+knitr::kable(
+  site_info,
+  caption = "Site-level metadata used to define contrasts.",
+  row.names = FALSE
+)
+
+reference_targets <- setdiff(as.character(site_levels_present), reference_site)
+
+reference_contrasts <- data.frame(
+  numerator = reference_targets,
+  denominator = reference_site,
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::mutate(
+    contrast = paste0(numerator, "_vs_", denominator)
+  )
+
+auto_wwtp_sites <- site_info %>%
+  dplyr::filter(stringr::str_detect(site_type, stringr::regex("downstream[_ ]?WWTP", ignore_case = TRUE))) %>%
+  dplyr::pull(site) %>%
+  as.character()
+
+if (length(auto_wwtp_sites) > 0) {
+  local_pairs_list <- lapply(auto_wwtp_sites, function(ds_site) {
+    idx <- match(ds_site, site_levels_present)
+    if (!is.na(idx) && idx > 1) {
+      data.frame(
+        upstream = as.character(site_levels_present[idx - 1]),
+        downstream = as.character(ds_site),
+        stringsAsFactors = FALSE
+      )
+    } else {
+      NULL
+    }
+  })
+  local_pairs <- dplyr::bind_rows(local_pairs_list)
+} else {
+  local_pairs <- fallback_local_pairs
+}
+
+local_pairs <- local_pairs %>%
+  dplyr::filter(
+    upstream %in% as.character(site_levels_present),
+    downstream %in% as.character(site_levels_present)
+  ) %>%
+  dplyr::distinct()
+
+local_contrasts <- local_pairs %>%
+  dplyr::transmute(
+    numerator = downstream,
+    denominator = upstream,
+    contrast = paste0(downstream, "_vs_", upstream)
+  )
+
+contrast_membership_long <- dplyr::bind_rows(
+  reference_contrasts %>%
+    dplyr::mutate(comparison_class = "reference_to_downstream"),
+  local_contrasts %>%
+    dplyr::mutate(comparison_class = "local_upstream_downstream")
+)
+
+all_contrasts <- contrast_membership_long %>%
+  dplyr::group_by(numerator, denominator, contrast) %>%
+  dplyr::summarise(
+    is_reference_contrast = any(comparison_class == "reference_to_downstream"),
+    is_local_contrast = any(comparison_class == "local_upstream_downstream"),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    comparison_class = dplyr::case_when(
+      is_reference_contrast & is_local_contrast ~ "both",
+      is_reference_contrast ~ "reference_to_downstream",
+      is_local_contrast ~ "local_upstream_downstream",
+      TRUE ~ "other"
+    )
+  )
+
+write_table_safe(reference_contrasts, tables_dir, "reference_contrasts.csv")
+write_table_safe(local_contrasts, tables_dir, "local_contrasts.csv")
+write_table_safe(contrast_membership_long, tables_dir, "contrast_membership_long.csv")
+write_table_safe(all_contrasts, tables_dir, "all_contrasts_unique.csv")
+
+# New: copies for Results 5 seed layer
+write_table_safe(reference_contrasts, seed_manifests_dir, "results5_reference_contrasts.csv")
+write_table_safe(local_contrasts, seed_manifests_dir, "results5_local_contrasts.csv")
+write_table_safe(contrast_membership_long, seed_manifests_dir, "results5_contrast_membership_long.csv")
+write_table_safe(all_contrasts, seed_manifests_dir, "results5_all_contrasts_unique.csv")
+
+knitr::kable(
+  all_contrasts,
+  caption = "Unique contrasts included in the DESeq2 analysis, with reporting membership flags.",
+  row.names = FALSE
+)
+```
+
+**Interpretation.** The contrast framework now reflects the biology more faithfully. In particular, `HOL02_vs_HOL01` is no longer forced to behave as either a reference contrast or a local transition; instead, it is treated as one unique comparison that contributes to both interpretive lenses. This is preferable because it prevents artificial duplication while preserving the fact that the earliest downstream shift is simultaneously a local transition of interest.
+
+# 7. Low-count filtering for DESeq2
+
+A mild prefilter is applied before fitting the model. This reduces the number of very sparse genes that carry little information for differential expression and improves computational efficiency.
+
+Here, genes are retained if they have at least `r min_count` counts in at least `r min_samples` samples.
+
+```{r prefilter_counts}
+keep_genes <- rowSums(counts_mat_rounded >= min_count) >= min_samples
+counts_filt <- counts_mat_rounded[keep_genes, , drop = FALSE]
+
+filter_summary <- data.frame(
+  metric = c("genes_raw", "genes_after_filter", "genes_removed", "samples_retained"),
+  value = c(
+    nrow(counts_mat_rounded),
+    nrow(counts_filt),
+    nrow(counts_mat_rounded) - nrow(counts_filt),
+    ncol(counts_filt)
+  )
+)
+
+write_table_safe(filter_summary, tables_dir, "filtering_summary.csv")
+
+prefilter_gene_universe <- data.frame(
+  gene_id = rownames(counts_filt),
+  passed_results4_prefilter = 1L,
+  stringsAsFactors = FALSE
+)
+
+write_table_safe(prefilter_gene_universe, seed_manifests_dir, "results4_prefilter_gene_universe.csv")
+write_table_safe(filter_summary, seed_manifests_dir, "results4_filtering_summary.csv")
+
+knitr::kable(
+  filter_summary,
+  caption = "Summary of prefiltering before DESeq2.",
+  row.names = FALSE
+)
+```
+
+# 8. Fit DESeq2 model
+
+The DESeq2 model is fit using site as the main factor. HOL01 is used as the reference level so that downstream-vs-reference contrasts are directly interpretable.
+
+Because the Galaxy gene matrix was derived from Salmon estimated counts and the local DESeq2 setup does not support the non-integer workflow directly, the matrix used here is the **rounded gene-level estimated-count matrix**.
+
+In addition to normalized counts, we also save a VST matrix that will later be used for contrast-specific DEG heatmaps, cluster profiles, and the DEG-based ordination.
+
+```{r run_deseq}
+meta$site <- stats::relevel(meta$site, ref = reference_site)
+
+dds <- DESeq2::DESeqDataSetFromMatrix(
+  countData = counts_filt,
+  colData = meta,
+  design = ~ site
+)
+
+dds <- DESeq2::DESeq(dds)
+
+norm_counts <- DESeq2::counts(dds, normalized = TRUE)
+
+readr::write_tsv(
+  tibble::rownames_to_column(as.data.frame(norm_counts), "gene_id"),
+  file.path(matrices_dir, "normalized_counts.tsv")
+)
+
+vsd_degord <- DESeq2::vst(dds, blind = FALSE)
+vst_degord_mat <- SummarizedExperiment::assay(vsd_degord)
+
+readr::write_tsv(
+  tibble::rownames_to_column(as.data.frame(vst_degord_mat), "gene_id"),
+  file.path(matrices_dir, "vst_matrix_for_deg_ordination.tsv")
+)
+
+capture.output(DESeq2::resultsNames(dds), file = file.path(logs_dir, "resultsNames.txt"))
+```
+
+# 9. Extract DESeq2 results for all contrasts
+
+Each contrast is extracted from the fitted DESeq2 model, and both raw and shrunken log2 fold changes are retained. Significance is defined as:
+
+* adjusted p-value < `r alpha_padj`
+* absolute shrunken log2 fold change >= `r lfc_sig_threshold`
+
+Annotation-based labels are attached directly to each contrast table.
+
+In addition, this step exports a **Results 5 seed layer** containing:
+
+* the per-contrast tested DESeq2 universe,
+* GOseq-ready 0/1 gene vectors,
+* direction-specific up/down vectors,
+* and manifest tables describing the contrast set.
+
+```{r extract_all_contrasts}
+contrast_results_list <- list()
+contrast_summary_list <- list()
+contrast_seed_manifest_list <- list()
+
+for (i in seq_len(nrow(all_contrasts))) {
+  numerator_i <- all_contrasts$numerator[i]
+  denominator_i <- all_contrasts$denominator[i]
+  class_i <- all_contrasts$comparison_class[i]
+  contrast_i <- all_contrasts$contrast[i]
+
+  contrast_dirs <- get_contrast_dirs(contrast_i)
+
+  res_i <- extract_deseq_contrast(
+    dds = dds,
+    numerator = numerator_i,
+    denominator = denominator_i,
+    annotation_df = annotation_gene,
+    alpha = alpha_padj,
+    lfc_sig = lfc_sig_threshold
+  ) %>%
+    dplyr::mutate(
+      comparison_class = class_i,
+      is_reference_contrast = all_contrasts$is_reference_contrast[i],
+      is_local_contrast = all_contrasts$is_local_contrast[i]
+    )
+
+  summary_i <- summarize_contrast(res_i, comparison_class = class_i)
+  summary_i$is_reference_contrast <- all_contrasts$is_reference_contrast[i]
+  summary_i$is_local_contrast <- all_contrasts$is_local_contrast[i]
+
+  seed_manifest_i <- export_results5_seed_files(
+    res_df = res_i,
+    contrast_label = contrast_i,
+    outdir_tables = seed_tables_dir,
+    outdir_lists = seed_lists_dir
+  )
+
+  contrast_results_list[[contrast_i]] <- res_i
+  contrast_summary_list[[contrast_i]] <- summary_i
+  contrast_seed_manifest_list[[contrast_i]] <- seed_manifest_i
+
+  write_table_safe(
+    res_i,
+    contrast_dirs$tables,
+    paste0(contrast_i, "_DESeq2_results.csv")
+  )
+
+  write_table_safe(
+    res_i %>% dplyr::filter(significant),
+    contrast_dirs$tables,
+    paste0(contrast_i, "_significant_DEGs.csv")
+  )
+}
+
+contrast_summary <- dplyr::bind_rows(contrast_summary_list) %>%
+  dplyr::left_join(
+    contrast_crosswalk %>%
+      dplyr::select(
+        contrast_id,
+        contrast_display = display_label,
+        numerator_tag,
+        denominator_tag
+      ),
+    by = c("contrast" = "contrast_id")
+  ) %>%
+  dplyr::arrange(dplyr::desc(n_significant), dplyr::desc(median_abs_lfc_sig))
+
+contrast_seed_manifest <- dplyr::bind_rows(contrast_seed_manifest_list) %>%
+  dplyr::arrange(dplyr::desc(n_sig_genes), dplyr::desc(n_tested_genes))
+
+write_table_safe(contrast_summary, tables_dir, "contrast_summary.csv")
+write_table_safe(contrast_seed_manifest, seed_manifests_dir, "contrast_seed_manifest.csv")
+
+knitr::kable(
+  contrast_summary,
+  digits = 3,
+  caption = "Summary statistics for all unique DESeq2 contrasts.",
+  row.names = FALSE
+)
+```
+
+**Interpretation.** At this stage, each biological comparison exists only once in the results object, but the summary table now preserves whether it belongs to the reference framework, the local framework, or both. This makes the downstream interpretation cleaner, because large responses are no longer hidden or lost simply due to overlap in contrast naming. At the same time, the Results 5 seed exports preserve the exact tested universe for each contrast, which will later support defensible GOseq background definition.
+
+# 10. Differential expression burden across the gradient
+
+This section summarizes how DEG burden changes across the downstream-vs-reference contrasts. These comparisons indicate how strongly each site differs from the reference condition and whether responses are predominantly up- or down-regulated relative to HOL01.
+
+```{r reference_summary}
+reference_summary <- contrast_summary %>%
+  dplyr::filter(is_reference_contrast) %>%
+  dplyr::mutate(
+    contrast = factor(contrast, levels = contrast)
+  )
+
+knitr::kable(
+  reference_summary,
+  digits = 3,
+  caption = "Reference-to-downstream contrast summary.",
+  row.names = FALSE
+)
+```
+
+```{r ref_deg_burden_plot, fig.width=8, fig.height=5.2}
+# Publication-grade burden panel for Figure 4A
+# Keeps the same underlying summary object and output name
+
+reference_order <- c("HOL02", "HOL03", "HOL04", "HOL05", "HOL06")
+wwtp_downstream_sites <- c("HOL02", "HOL05")
+
+direction_palette <- c(
+  "Down in downstream site" = "#C44E52",
+  "Up in downstream site"   = "#4C72B0"
+)
+
+panel_border_col <- "black"
+panel_border_lwd <- 0.30
+
+reference_summary <- contrast_summary %>%
+  dplyr::filter(is_reference_contrast) %>%
+  dplyr::mutate(
+    river_rank = match(numerator, reference_order)
+  ) %>%
+  dplyr::arrange(river_rank) %>%
+  dplyr::mutate(
+    contrast = factor(contrast, levels = contrast)
+  )
+
+knitr::kable(
+  reference_summary %>%
+    dplyr::select(
+      contrast_display, numerator_tag, denominator_tag,
+      n_significant, n_up_in_numerator, n_down_in_numerator,
+      median_abs_lfc_sig, q90_abs_lfc_sig, max_abs_lfc_sig
+    ),
+  digits = 3,
+  caption = "Reference-to-downstream contrast summary.",
+  row.names = FALSE
+)
+
+ref_site_display_levels <- reference_summary %>%
+  dplyr::mutate(
+    site_display = ifelse(
+      numerator %in% wwtp_downstream_sites,
+      paste0(numerator_tag, " *"),
+      numerator_tag
+    )
+  ) %>%
+  dplyr::arrange(river_rank) %>%
+  dplyr::pull(site_display)
+
+ref_burden_long <- reference_summary %>%
+  dplyr::transmute(
+    numerator,
+    contrast,
+    numerator_tag,
+    site_display = ifelse(
+      numerator %in% wwtp_downstream_sites,
+      paste0(numerator_tag, " *"),
+      numerator_tag
+    ),
+    n_up_in_numerator,
+    n_down_in_numerator
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(n_up_in_numerator, n_down_in_numerator),
+    names_to = "direction",
+    values_to = "n_deg"
+  ) %>%
+  dplyr::mutate(
+    plot_value = ifelse(direction == "n_down_in_numerator", -n_deg, n_deg),
+    direction = dplyr::recode(
+      direction,
+      n_up_in_numerator   = "Up in downstream site",
+      n_down_in_numerator = "Down in downstream site"
+    ),
+    site_display = factor(site_display, levels = rev(ref_site_display_levels))
+  )
+
+ref_max_deg <- max(
+  c(reference_summary$n_up_in_numerator, reference_summary$n_down_in_numerator),
+  na.rm = TRUE
+)
+
+ref_total_labels <- reference_summary %>%
+  dplyr::transmute(
+    site_display = ifelse(
+      numerator %in% wwtp_downstream_sites,
+      paste0(numerator_tag, " *"),
+      numerator_tag
+    ),
+    total_deg = n_significant
+  ) %>%
+  dplyr::mutate(
+    site_display = factor(site_display, levels = rev(ref_site_display_levels)),
+    label_x = ref_max_deg * 1.10
+  )
+
+p_ref_burden <- ggplot2::ggplot(
+  ref_burden_long,
+  ggplot2::aes(y = site_display, x = plot_value, fill = direction)
+) +
+  ggplot2::geom_col(width = 0.72) +
+  ggplot2::geom_vline(xintercept = 0, linewidth = 0.45, colour = "grey35") +
+  ggplot2::geom_text(
+    data = ref_total_labels,
+    ggplot2::aes(y = site_display, x = label_x, label = total_deg),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  ggplot2::scale_fill_manual(values = direction_palette) +
+  ggplot2::scale_x_continuous(labels = function(x) abs(x)) +
+  ggplot2::coord_cartesian(
+    xlim = c(-ref_max_deg * 1.08, ref_max_deg * 1.28),
+    clip = "off"
+  ) +
+  ggplot2::labs(
+    title = "DEG burden across downstream-vs-reference contrasts",
+    subtitle = "* downstream of WWTP; numbers indicate total significant DEGs",
+    x = "Number of significant DEGs",
+    y = NULL,
+    fill = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "top",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 9),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 24, 8, 8)
+  )
+
+p_ref_burden
+
+# Legacy output name
+save_plot_dual(
+  p_ref_burden,
+  plots_dir,
+  "01_reference_deg_burden",
+  width = 8.0,
+  height = 5.0,
+  dpi = plot_dpi
+)
+
+# Standalone export for manual assembly
+save_plot_dual(
+  p_ref_burden,
+  plots_dir,
+  "Figure4A_reference_DEG_burden_publication",
+  width = 7.8,
+  height = 4.8,
+  dpi = 600
+)
+```
+
+**Interpretation.** Differential expression burden is clearly structured across the Holtemme gradient, but it does not follow a simple monotonic downstream increase. Instead, some stations show markedly stronger transcriptional disruption than others, and the balance between up- and down-regulation also varies among sites. This indicates that the river gradient is not captured by a single smooth progression of increasing transcriptomic change. Rather, it appears to combine broader downstream differentiation with sharper reorganizations at particular stations or transitions.
+
+# 11. Effect-size distributions across the gradient
+
+DEG counts alone do not capture the magnitude of transcriptional change. This section summarizes the distribution of shrunken effect sizes among significant genes for each downstream-vs-reference contrast.
+
+```{r reference_effect_sizes}
+reference_effect_df <- dplyr::bind_rows(
+  lapply(names(contrast_results_list), function(nm) contrast_results_list[[nm]])
+) %>%
+  dplyr::filter(
+    contrast %in% as.character(reference_summary$contrast),
+    significant
+  )
+
+write_table_safe(reference_effect_df, tables_dir, "reference_significant_deg_table.csv")
+
+knitr::kable(
+  reference_summary %>%
+    dplyr::select(contrast, n_significant, median_abs_lfc_sig, q90_abs_lfc_sig, max_abs_lfc_sig),
+  digits = 3,
+  caption = "Effect-size summary for downstream-vs-reference contrasts.",
+  row.names = FALSE
+)
+```
+
+```{r ref_effect_summary_plot, fig.width=6.4, fig.height=5.2}
+# Publication-grade effect-size summary panel for Figure 4B
+# Replaces the violin+boxplot with a cleaner manuscript-oriented summary
+
+reference_effect_df <- dplyr::bind_rows(
+  lapply(names(contrast_results_list), function(nm) contrast_results_list[[nm]])
+) %>%
+  dplyr::filter(
+    contrast %in% as.character(reference_summary$contrast),
+    significant
+  )
+
+write_table_safe(reference_effect_df, tables_dir, "reference_significant_deg_table.csv")
+
+knitr::kable(
+  reference_summary %>%
+    dplyr::select(
+      contrast, n_significant,
+      median_abs_lfc_sig, q90_abs_lfc_sig, max_abs_lfc_sig
+    ),
+  digits = 3,
+  caption = "Effect-size summary for downstream-vs-reference contrasts.",
+  row.names = FALSE
+)
+
+ref_effect_plot_df <- reference_summary %>%
+  dplyr::transmute(
+    numerator,
+    contrast,
+    site_display = ifelse(
+      numerator %in% wwtp_downstream_sites,
+      paste0(numerator, " *"),
+      numerator
+    ),
+    median_abs_lfc_sig,
+    q90_abs_lfc_sig,
+    max_abs_lfc_sig
+  ) %>%
+  dplyr::mutate(
+    site_display = factor(site_display, levels = rev(ref_site_display_levels))
+  )
+
+ref_effect_xmax <- max(ref_effect_plot_df$q90_abs_lfc_sig, na.rm = TRUE) * 1.18
+
+p_ref_lfc <- ggplot2::ggplot(
+  ref_effect_plot_df,
+  ggplot2::aes(y = site_display)
+) +
+  ggplot2::geom_segment(
+    ggplot2::aes(x = 0, xend = q90_abs_lfc_sig, yend = site_display),
+    linewidth = 1.0,
+    colour = "grey70"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = q90_abs_lfc_sig),
+    shape = 21,
+    size = 3.2,
+    stroke = 0.8,
+    fill = "white",
+    colour = "black"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = median_abs_lfc_sig),
+    shape = 21,
+    size = 4.0,
+    stroke = 0.8,
+    fill = "grey45",
+    colour = "black"
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, ref_effect_xmax), clip = "off") +
+  ggplot2::labs(
+    title = "Effect-size summary across downstream-vs-reference contrasts",
+    subtitle = "Filled circles: median |log2FC|; open circles: 90th percentile",
+    x = "Absolute shrunken log2 fold change among significant DEGs",
+    y = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "none",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 9),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 18, 8, 8)
+  )
+
+p_ref_lfc
+
+# Legacy output name
+save_plot_dual(
+  p_ref_lfc,
+  plots_dir,
+  "02_reference_effect_size_distribution",
+  width = 6.6,
+  height = 5.0,
+  dpi = plot_dpi
+)
+
+# Standalone export for manual assembly
+save_plot_dual(
+  p_ref_lfc,
+  plots_dir,
+  "Figure4B_reference_effect_size_summary_publication",
+  width = 4.6,
+  height = 4.8,
+  dpi = 600
+)
+```
+
+**Interpretation.** Effect-size distributions refine the burden-based view by showing that contrasts with many DEGs are not necessarily the same contrasts with the largest per-gene shifts. Some sites appear to differ from the reference through broad but moderate reorganization, whereas others show fewer but more extreme fold changes. This distinction is important because it implies that “response strength” can reflect different transcriptomic architectures, not just larger DEG counts.
+
+# 12. MA plots for downstream-vs-reference contrasts
+
+MA plots provide a compact view of expression level versus effect size for each contrast and are useful for identifying whether strong changes are concentrated among low-, medium-, or high-expression genes.
+
+```{r reference_ma_plots, fig.width=8, fig.height=6}
+for (i in seq_len(nrow(reference_summary))) {
+  contrast_i <- as.character(reference_summary$contrast[i])
+  res_i <- contrast_results_list[[contrast_i]]
+  contrast_dirs <- get_contrast_dirs(contrast_i)
+
+  p_ma_i <- make_ma_plot(
+    res_df = res_i,
+    title_text = paste0("MA plot: ", contrast_i),
+    lfc_line = lfc_sig_threshold
+  )
+
+  print(p_ma_i)
+
+  save_plot_dual(
+    p_ma_i,
+    contrast_dirs$plots,
+    paste0("MA_", contrast_i),
+    width = 8,
+    height = 6,
+    dpi = plot_dpi
+  )
+}
+```
+
+# 12b. Volcano plots for downstream-vs-reference contrasts
+
+Volcano plots complement the MA plots by emphasizing the combined distribution of statistical support and effect size. They are especially useful for comparing the overall shape of differential expression across the downstream-vs-reference contrasts and for highlighting the most prominent genes in each comparison.
+
+```{r reference_volcano_plots, fig.width=8, fig.height=6}
+for (i in seq_len(nrow(reference_summary))) {
+  contrast_i <- as.character(reference_summary$contrast[i])
+  res_i <- contrast_results_list[[contrast_i]]
+  contrast_dirs <- get_contrast_dirs(contrast_i)
+
+  p_volcano_i <- make_volcano_plot(
+    res_df = res_i,
+    title_text = paste0("Volcano plot: ", contrast_i),
+    alpha = alpha_padj,
+    lfc_cutoff = lfc_sig_threshold,
+    max_labels = 12
+  )
+
+  print(p_volcano_i)
+
+  save_plot_dual(
+    p_volcano_i,
+    contrast_dirs$plots,
+    paste0("Volcano_", contrast_i),
+    width = 8,
+    height = 6,
+    dpi = plot_dpi
+  )
+}
+```
+
+**Interpretation.** The MA and volcano plots support the view that these contrasts reflect genuine transcriptome-wide reorganization rather than isolated shifts in a small set of low-count genes. Significant genes are distributed across a broad range of mean expression values, and the contrast shapes differ in informative ways. Some sites show broad bidirectional responses, whereas others are more asymmetric, consistent with differences in DEG directionality and effect-size structure. Together, these plots suggest that the site contrasts differ not only in DEG number but also in the internal organization of the response.
+
+# 12c. Contrast-specific DEG heatmaps and cluster profiles for downstream-vs-reference contrasts
+
+Beyond DEG counts and fold-change summaries, it is useful to examine how each contrast is organized internally in expression space. For each downstream-vs-reference contrast, we therefore generate:
+
+* a contrast-specific DEG heatmap using only the samples from the two sites involved,
+* hierarchical clustering of DEG profiles,
+* cluster gene lists with annotation labels,
+* median-centered VST matrices per cluster,
+* and a Trinity-style cluster-profile PDF.
+
+These outputs are intended as descriptive tools for contrast evaluation and prioritization rather than as new inferential tests.
+
+```{r reference_heatmaps_and_clusters, fig.width=8, fig.height=10}
+reference_pattern_summary <- list()
+
+for (i in seq_len(nrow(reference_summary))) {
+  contrast_i <- as.character(reference_summary$contrast[i])
+  numerator_i <- as.character(reference_summary$numerator[i])
+  denominator_i <- as.character(reference_summary$denominator[i])
+
+  contrast_dirs <- get_contrast_dirs(contrast_i)
+  res_i <- contrast_results_list[[contrast_i]]
+
+  pattern_obj <- prepare_contrast_pattern_data(
+    res_df = res_i,
+    vst_mat = vst_degord_mat,
+    meta_df = meta,
+    numerator = numerator_i,
+    denominator = denominator_i,
+    max_pattern_genes = max_deg_pattern_genes
+  )
+
+  if (!is.null(pattern_obj)) {
+    plot_contrast_deg_heatmap(
+      pattern_obj = pattern_obj,
+      contrast_label = contrast_i,
+      outdir = contrast_dirs$plots,
+      max_display_genes = max_heatmap_display_genes
+    )
+
+    cl_obj <- cluster_and_export_profiles(
+      pattern_obj = pattern_obj,
+      contrast_label = contrast_i,
+      numerator = numerator_i,
+      denominator = denominator_i,
+      outdir_tables = contrast_dirs$tables,
+      outdir_plots = contrast_dirs$plots,
+      annotation_df = annotation_gene,
+      ptree = ptree_percent
+    )
+
+    reference_pattern_summary[[contrast_i]] <- data.frame(
+      contrast = contrast_i,
+      n_sig_genes_available = nrow(res_i %>% dplyr::filter(significant)),
+      n_genes_used_for_patterns = nrow(pattern_obj$z_mat),
+      n_clusters = if (is.null(cl_obj)) NA_integer_ else length(unique(cl_obj$cluster_df$cluster)),
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+if (length(reference_pattern_summary) > 0) {
+  reference_pattern_summary_df <- dplyr::bind_rows(reference_pattern_summary)
+  write_table_safe(reference_pattern_summary_df, tables_dir, "reference_contrast_pattern_summary.csv")
+
+  knitr::kable(
+    reference_pattern_summary_df,
+    caption = "Summary of contrast-specific DEG heatmaps and cluster-profile outputs for downstream-vs-reference contrasts.",
+    row.names = FALSE
+  )
+}
+```
+
+**Interpretation.** The heatmaps and cluster profiles show that each downstream-vs-reference comparison contains substantial internal structure rather than one uniform shift across all DEGs. Each contrast resolves into multiple coordinated patterns, indicating that transcriptomic change is modular and heterogeneous. Biologically, this supports the idea that site differences emerge through several concurrent transcriptional programs rather than through a single generalized stress signature. It also strengthens the rationale for later pathway analysis at the contrast level.
+
+# 13. Shared versus site-specific DEGs across downstream contrasts
+
+One key biological question is whether downstream sites respond through largely shared transcriptional programs or whether each site shows a more distinct DEG signature. To address this, we summarize the recurrence of significant DEGs across all downstream-vs-reference contrasts.
+
+```{r shared_vs_unique_reference}
+reference_sig_lists <- lapply(reference_summary$contrast, function(ct) {
+  contrast_results_list[[as.character(ct)]] %>%
+    dplyr::filter(significant) %>%
+    dplyr::pull(gene_id)
+})
+names(reference_sig_lists) <- as.character(reference_summary$contrast)
+
+all_reference_sig_genes <- sort(unique(unlist(reference_sig_lists)))
+
+if (length(all_reference_sig_genes) > 0) {
+  reference_presence <- data.frame(gene_id = all_reference_sig_genes, stringsAsFactors = FALSE)
+
+  for (ct in names(reference_sig_lists)) {
+    reference_presence[[ct]] <- reference_presence$gene_id %in% reference_sig_lists[[ct]]
+  }
+
+  reference_presence <- reference_presence %>%
+    dplyr::mutate(
+      n_reference_contrasts = rowSums(dplyr::across(-gene_id)),
+      recurrence_class = dplyr::case_when(
+        n_reference_contrasts == 1 ~ "site_specific",
+        n_reference_contrasts > 1 ~ "shared",
+        TRUE ~ "other"
+      )
+    )
+
+  reference_presence <- reference_presence %>%
+    dplyr::left_join(annotation_gene, by = "gene_id")
+
+  write_table_safe(reference_presence, matrices_dir, "reference_deg_presence_matrix.csv")
+
+  recurrence_summary <- reference_presence %>%
+    dplyr::count(n_reference_contrasts, name = "n_genes") %>%
+    dplyr::arrange(n_reference_contrasts)
+
+  unique_shared_summary <- data.frame(
+    contrast = names(reference_sig_lists),
+    total_sig = vapply(reference_sig_lists, length, integer(1)),
+    unique_sig = vapply(names(reference_sig_lists), function(ct) {
+      sum(reference_presence[[ct]] & reference_presence$n_reference_contrasts == 1)
+    }, integer(1)),
+    shared_sig = vapply(names(reference_sig_lists), function(ct) {
+      sum(reference_presence[[ct]] & reference_presence$n_reference_contrasts > 1)
+    }, integer(1)),
+    stringsAsFactors = FALSE
+  )
+
+  write_table_safe(recurrence_summary, tables_dir, "reference_deg_recurrence_summary.csv")
+  write_table_safe(unique_shared_summary, tables_dir, "reference_unique_shared_summary.csv")
+
+  knitr::kable(
+    recurrence_summary,
+    caption = "Recurrence of significant DEGs across downstream-vs-reference contrasts.",
+    row.names = FALSE
+  )
+
+  knitr::kable(
+    unique_shared_summary,
+    caption = "Unique versus shared significant DEGs per downstream-vs-reference contrast.",
+    row.names = FALSE
+  )
+}
+```
+
+```{r recurrence_plot, fig.width=7, fig.height=5}
+if (exists("recurrence_summary")) {
+  p_recurrence <- ggplot2::ggplot(recurrence_summary, ggplot2::aes(x = factor(n_reference_contrasts), y = n_genes)) +
+    ggplot2::geom_col() +
+    ggplot2::labs(
+      title = "How many downstream contrasts share each significant DEG?",
+      x = "Number of downstream-vs-reference contrasts",
+      y = "Number of genes"
+    ) +
+    ggplot2::theme_bw()
+
+  p_recurrence
+  save_plot_dual(p_recurrence, plots_dir, "03_reference_deg_recurrence", width = 7, height = 5, dpi = plot_dpi)
+}
+```
+
+```{r unique_shared_plot, fig.width=8, fig.height=5}
+if (exists("unique_shared_summary")) {
+  unique_shared_long <- unique_shared_summary %>%
+    dplyr::select(contrast, unique_sig, shared_sig) %>%
+    tidyr::pivot_longer(
+      cols = c(unique_sig, shared_sig),
+      names_to = "category",
+      values_to = "n_genes"
+    ) %>%
+    dplyr::mutate(
+      category = dplyr::recode(category, unique_sig = "Unique to contrast", shared_sig = "Shared with other contrasts")
+    )
+
+  p_unique_shared <- ggplot2::ggplot(unique_shared_long, ggplot2::aes(x = contrast, y = n_genes, fill = category)) +
+    ggplot2::geom_col() +
+    ggplot2::labs(
+      title = "Unique versus shared DEGs across downstream-vs-reference contrasts",
+      x = "Contrast",
+      y = "Number of significant DEGs"
+    ) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+
+  p_unique_shared
+  save_plot_dual(p_unique_shared, plots_dir, "04_reference_unique_shared", width = 8, height = 5, dpi = plot_dpi)
+}
+```
+
+**Interpretation.** Downstream sites share a substantial DEG core, but the response is not fully convergent. The recurrence and unique/shared summaries indicate that some portion of the response is repeatedly observed across multiple site contrasts, while another portion remains contrast-specific. This suggests that the Holtemme gradient contains both a common downstream transcriptional backbone and localized or site-specific reorganization superimposed on it.
+
+# 14. Pairwise overlap among downstream contrasts
+
+Pairwise overlap provides a second view of shared transcriptional responses by showing how similar DEG sets are between downstream contrasts.
+
+```{r jaccard_reference}
+if (length(reference_sig_lists) > 1) {
+  jaccard_reference <- compute_jaccard_matrix(reference_sig_lists)
+
+  readr::write_csv(
+    tibble::rownames_to_column(as.data.frame(jaccard_reference), "contrast"),
+    file.path(matrices_dir, "reference_jaccard_matrix.csv")
+  )
+}
+```
+
+```{r jaccard_reference_heatmap, fig.width=7, fig.height=6}
+if (exists("jaccard_reference")) {
+  pheatmap::pheatmap(
+    jaccard_reference,
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    display_numbers = TRUE,
+    number_format = "%.2f",
+    main = "Jaccard overlap among downstream-vs-reference DEG sets"
+  )
+
+  pheatmap::pheatmap(
+    jaccard_reference,
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    display_numbers = TRUE,
+    number_format = "%.2f",
+    main = "Jaccard overlap among downstream-vs-reference DEG sets",
+    filename = file.path(plots_dir, "05_reference_jaccard_heatmap.png"),
+    width = 7,
+    height = 6
+  )
+
+  pdf(file.path(plots_dir, "05_reference_jaccard_heatmap.pdf"), width = 7, height = 6)
+  pheatmap::pheatmap(
+    jaccard_reference,
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    display_numbers = TRUE,
+    number_format = "%.2f",
+    main = "Jaccard overlap among downstream-vs-reference DEG sets"
+  )
+  dev.off()
+}
+```
+
+# 14b. DEG-based ordination as a post hoc check of station organization
+
+Because the DEG sets are defined from the same site contrasts used in the differential expression analysis, the following ordination is not treated as an independent test of gradient structure. Instead, it is used as a **post hoc visualization** to assess whether the station organization observed in the full-matrix ordination is recapitulated when the analysis is restricted to genes contributing to downstream differential expression.
+
+Here, we use the **union of significant DEGs across all downstream-vs-reference contrasts** and project all German samples into this DEG-focused expression space.
+
+```{r deg_union_for_ordination}
+reference_deg_union <- sort(unique(unlist(reference_sig_lists)))
+reference_deg_union <- intersect(reference_deg_union, rownames(vst_degord_mat))
+
+deg_union_summary <- data.frame(
+  metric = c(
+    "n_reference_contrasts",
+    "n_union_significant_degs_for_ordination",
+    "n_samples_projected"
+  ),
+  value = c(
+    length(reference_sig_lists),
+    length(reference_deg_union),
+    ncol(vst_degord_mat)
+  )
+)
+
+write_table_safe(deg_union_summary, tables_dir, "deg_union_ordination_summary.csv")
+
+knitr::kable(
+  deg_union_summary,
+  caption = "Summary of the DEG union used for post hoc DEG-based ordination.",
+  row.names = FALSE
+)
+```
+
+```{r deg_based_pca_compute}
+if (length(reference_deg_union) >= 2) {
+  deg_ord_mat <- vst_degord_mat[reference_deg_union, , drop = FALSE]
+
+  pca_deg <- stats::prcomp(t(deg_ord_mat), center = TRUE, scale. = FALSE)
+  percent_var_deg <- (pca_deg$sdev^2) / sum(pca_deg$sdev^2)
+
+  pca_deg_scores <- as.data.frame(pca_deg$x)
+  pca_deg_scores$sample <- rownames(pca_deg_scores)
+
+  pca_deg_scores <- dplyr::left_join(
+    pca_deg_scores,
+    meta,
+    by = "sample"
+  )
+
+  pca_deg_var_table <- data.frame(
+    PC = paste0("PC", seq_along(percent_var_deg)),
+    eigenvalue = pca_deg$sdev^2,
+    proportion_variance = percent_var_deg,
+    cumulative_variance = cumsum(percent_var_deg)
+  )
+
+  write_table_safe(pca_deg_scores, tables_dir, "deg_based_pca_sample_scores.csv")
+  write_table_safe(pca_deg_var_table, tables_dir, "deg_based_pca_variance_explained.csv")
+
+  knitr::kable(
+    head(pca_deg_var_table, 10),
+    digits = 3,
+    caption = "Variance explained by the first principal components in the DEG-based ordination.",
+    row.names = FALSE
+  )
+}
+```
+
+```{r deg_based_pca_plot_pc1_pc2, fig.width=8, fig.height=6}
+if (exists("pca_deg_scores")) {
+  p_pca_deg_12 <- ggplot2::ggplot(
+    pca_deg_scores,
+    ggplot2::aes(x = PC1, y = PC2, colour = site, label = short_name)
+  ) +
+    ggplot2::geom_point(size = 3, alpha = 0.9) +
+    ggplot2::stat_ellipse(
+      ggplot2::aes(group = site),
+      linewidth = 0.6,
+      alpha = 0.5,
+      na.rm = TRUE
+    ) +
+    ggplot2::labs(
+      title = "PCA of union DEG set across downstream-vs-reference contrasts",
+      subtitle = paste0("Union DEG set size: ", length(reference_deg_union), " genes"),
+      x = paste0("PC1 (", round(percent_var_deg[1] * 100, 1), "%)"),
+      y = paste0("PC2 (", round(percent_var_deg[2] * 100, 1), "%)")
+    ) +
+    ggplot2::theme_bw()
+
+  if (isTRUE(label_points)) {
+    p_pca_deg_12 <- p_pca_deg_12 +
+      ggrepel::geom_text_repel(size = 3, max.overlaps = Inf, show.legend = FALSE)
+  }
+
+  p_pca_deg_12
+  save_plot_dual(
+    p_pca_deg_12,
+    plots_dir,
+    "05b_DEG_based_PCA_PC1_PC2",
+    width = plot_width,
+    height = plot_height,
+    dpi = plot_dpi
+  )
+}
+```
+
+```{r deg_based_pca_plot_pc1_pc3, fig.width=8, fig.height=6}
+if (exists("pca_deg_scores")) {
+  p_pca_deg_13 <- ggplot2::ggplot(
+    pca_deg_scores,
+    ggplot2::aes(x = PC1, y = PC3, colour = site, label = short_name)
+  ) +
+    ggplot2::geom_point(size = 3, alpha = 0.9) +
+    ggplot2::stat_ellipse(
+      ggplot2::aes(group = site),
+      linewidth = 0.6,
+      alpha = 0.5,
+      na.rm = TRUE
+    ) +
+    ggplot2::labs(
+      title = "PCA of union DEG set across downstream-vs-reference contrasts",
+      subtitle = paste0("Union DEG set size: ", length(reference_deg_union), " genes"),
+      x = paste0("PC1 (", round(percent_var_deg[1] * 100, 1), "%)"),
+      y = paste0("PC3 (", round(percent_var_deg[3] * 100, 1), "%)")
+    ) +
+    ggplot2::theme_bw()
+
+  if (isTRUE(label_points)) {
+    p_pca_deg_13 <- p_pca_deg_13 +
+      ggrepel::geom_text_repel(size = 3, max.overlaps = Inf, show.legend = FALSE)
+  }
+
+  p_pca_deg_13
+  save_plot_dual(
+    p_pca_deg_13,
+    plots_dir,
+    "05c_DEG_based_PCA_PC1_PC3",
+    width = plot_width,
+    height = plot_height,
+    dpi = plot_dpi
+  )
+}
+```
+
+```{r deg_based_distance_heatmap, fig.width=8, fig.height=7}
+if (exists("deg_ord_mat")) {
+  deg_sample_dist <- as.matrix(stats::dist(t(deg_ord_mat), method = "euclidean"))
+
+  readr::write_tsv(
+    tibble::rownames_to_column(as.data.frame(deg_sample_dist), "sample"),
+    file.path(matrices_dir, "deg_based_sample_distance_matrix.tsv")
+  )
+
+  annotation_col_deg <- data.frame(site = meta$site)
+  rownames(annotation_col_deg) <- meta$sample
+
+  pheatmap::pheatmap(
+    deg_sample_dist,
+    clustering_distance_rows = "euclidean",
+    clustering_distance_cols = "euclidean",
+    clustering_method = "complete",
+    annotation_col = annotation_col_deg,
+    annotation_row = annotation_col_deg,
+    main = "Sample-to-sample Euclidean distances using union DEG set"
+  )
+
+  pheatmap::pheatmap(
+    deg_sample_dist,
+    clustering_distance_rows = "euclidean",
+    clustering_distance_cols = "euclidean",
+    clustering_method = "complete",
+    annotation_col = annotation_col_deg,
+    annotation_row = annotation_col_deg,
+    main = "Sample-to-sample Euclidean distances using union DEG set",
+    filename = file.path(plots_dir, "05d_DEG_based_distance_heatmap.png"),
+    width = 8,
+    height = 7
+  )
+
+  pdf(file.path(plots_dir, "05d_DEG_based_distance_heatmap.pdf"), width = 8, height = 7)
+  pheatmap::pheatmap(
+    deg_sample_dist,
+    clustering_distance_rows = "euclidean",
+    clustering_distance_cols = "euclidean",
+    clustering_method = "complete",
+    annotation_col = annotation_col_deg,
+    annotation_row = annotation_col_deg,
+    main = "Sample-to-sample Euclidean distances using union DEG set"
+  )
+  dev.off()
+}
+```
+
+```{r deg_based_top_variable_heatmap, fig.width=8, fig.height=10}
+if (exists("deg_ord_mat")) {
+  deg_var <- apply(deg_ord_mat, 1, stats::var, na.rm = TRUE)
+  top_deg_n_use <- min(ntop_deg_heatmap, sum(deg_var > 0))
+  top_deg_genes <- names(sort(deg_var, decreasing = TRUE))[seq_len(top_deg_n_use)]
+
+  deg_top_mat <- deg_ord_mat[top_deg_genes, , drop = FALSE]
+  deg_top_z <- t(scale(t(deg_top_mat), center = TRUE, scale = TRUE))
+
+  pheatmap::pheatmap(
+    deg_top_z,
+    show_rownames = FALSE,
+    annotation_col = annotation_col_deg,
+    main = paste0("Top ", top_deg_n_use, " most variable genes from DEG union (z-scored VST)")
+  )
+
+  pheatmap::pheatmap(
+    deg_top_z,
+    show_rownames = FALSE,
+    annotation_col = annotation_col_deg,
+    main = paste0("Top ", top_deg_n_use, " most variable genes from DEG union (z-scored VST)"),
+    filename = file.path(plots_dir, "05e_DEG_based_top_variable_heatmap.png"),
+    width = 8,
+    height = 10
+  )
+
+  pdf(file.path(plots_dir, "05e_DEG_based_top_variable_heatmap.pdf"), width = 8, height = 10)
+  pheatmap::pheatmap(
+    deg_top_z,
+    show_rownames = FALSE,
+    annotation_col = annotation_col_deg,
+    main = paste0("Top ", top_deg_n_use, " most variable genes from DEG union (z-scored VST)")
+  )
+  dev.off()
+}
+```
+
+**Interpretation.** Pairwise overlap and DEG-based ordination provide a complementary view of the downstream contrasts. The Jaccard structure shows that some site comparisons are more similar than others at the DEG level, while the ordination demonstrates that genes contributing to differential expression also capture a substantial part of station separation. Because this DEG-based PCA is explicitly post hoc, it should not be treated as an independent confirmation test; however, it is informative in showing that the genes driving differential expression also sharpen the site organization previously observed in the full expression matrix.
+
+# 15. WWTP-associated local upstream–downstream contrasts
+
+Reference comparisons show how far each site departs from HOL01, but they do not isolate local transitions. The following contrasts focus on upstream–downstream changes at WWTP-associated sites and are therefore especially relevant for identifying localized transcriptomic disruption.
+
+One of these transitions, `HOL02_vs_HOL01`, also corresponds to the first downstream-vs-reference comparison and is therefore informative in both analytical frameworks.
+
+```{r local_summary}
+local_summary <- contrast_summary %>%
+  dplyr::filter(is_local_contrast) %>%
+  dplyr::mutate(
+    contrast = factor(contrast, levels = contrast)
+  )
+
+knitr::kable(
+  local_summary,
+  digits = 3,
+  caption = "Local upstream–downstream contrast summary.",
+  row.names = FALSE
+)
+```
+
+```{r local_deg_burden_plot, fig.width=7, fig.height=5}
+if (nrow(local_summary) > 0) {
+  local_burden_long <- local_summary %>%
+    dplyr::select(contrast, n_up_in_numerator, n_down_in_numerator) %>%
+    tidyr::pivot_longer(
+      cols = c(n_up_in_numerator, n_down_in_numerator),
+      names_to = "direction",
+      values_to = "n_deg"
+    ) %>%
+    dplyr::mutate(
+      plot_value = ifelse(direction == "n_down_in_numerator", -n_deg, n_deg),
+      direction = dplyr::recode(
+        direction,
+        n_up_in_numerator = "Up downstream",
+        n_down_in_numerator = "Down downstream"
+      )
+    )
+
+  p_local_burden <- ggplot2::ggplot(local_burden_long, ggplot2::aes(x = contrast, y = plot_value, fill = direction)) +
+    ggplot2::geom_col() +
+    ggplot2::geom_hline(yintercept = 0) +
+    ggplot2::labs(
+      title = "DEG burden at WWTP-associated local transitions",
+      x = "Contrast",
+      y = "Number of significant DEGs"
+    ) +
+    ggplot2::theme_bw()
+
+  p_local_burden
+  save_plot_dual(p_local_burden, plots_dir, "06_local_deg_burden", width = 7, height = 5, dpi = plot_dpi)
+}
+```
+
+```{r local_wwtp_summary_plot, fig.width=6.4, fig.height=4.6}
+# Publication-grade local WWTP transition panel for Figure 4C
+
+local_order <- c("HOL02_vs_HOL01", "HOL05_vs_HOL04")
+
+local_summary <- contrast_summary %>%
+  dplyr::filter(is_local_contrast) %>%
+  dplyr::mutate(
+    local_rank = match(contrast, local_order)
+  ) %>%
+  dplyr::arrange(local_rank) %>%
+  dplyr::mutate(
+    contrast = factor(contrast, levels = contrast)
+  )
+
+knitr::kable(
+  local_summary %>%
+    dplyr::select(
+      contrast_display, numerator_tag, denominator_tag,
+      n_significant, n_up_in_numerator, n_down_in_numerator,
+      median_abs_lfc_sig, q90_abs_lfc_sig, max_abs_lfc_sig
+    ),
+  digits = 3,
+  caption = "Local upstream–downstream contrast summary.",
+  row.names = FALSE
+)
+
+local_transition_levels <- local_summary %>%
+  dplyr::transmute(
+    transition_display = paste0(denominator_tag, "\u2192", numerator_tag)
+  ) %>%
+  dplyr::pull(transition_display)
+
+local_burden_long <- local_summary %>%
+  dplyr::transmute(
+    contrast,
+    transition_display = paste0(denominator_tag, "\u2192", numerator_tag),
+    n_up_in_numerator,
+    n_down_in_numerator
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(n_up_in_numerator, n_down_in_numerator),
+    names_to = "direction",
+    values_to = "n_deg"
+  ) %>%
+  dplyr::mutate(
+    plot_value = ifelse(direction == "n_down_in_numerator", -n_deg, n_deg),
+    direction = dplyr::recode(
+      direction,
+      n_up_in_numerator   = "Up in downstream site",
+      n_down_in_numerator = "Down in downstream site"
+    ),
+    transition_display = factor(
+      transition_display,
+      levels = rev(local_transition_levels)
+    )
+  )
+
+local_max_deg <- max(
+  c(local_summary$n_up_in_numerator, local_summary$n_down_in_numerator),
+  na.rm = TRUE
+)
+
+local_total_labels <- local_summary %>%
+  dplyr::transmute(
+    transition_display = paste0(denominator_tag, "\u2192", numerator_tag),
+    total_deg = n_significant
+  ) %>%
+  dplyr::mutate(
+    transition_display = factor(
+      transition_display,
+      levels = rev(local_transition_levels)
+    ),
+    label_x = local_max_deg * 1.10
+  )
+
+p_local_burden <- ggplot2::ggplot(
+  local_burden_long,
+  ggplot2::aes(y = transition_display, x = plot_value, fill = direction)
+) +
+  ggplot2::geom_col(width = 0.70) +
+  ggplot2::geom_vline(xintercept = 0, linewidth = 0.45, colour = "grey35") +
+  ggplot2::geom_text(
+    data = local_total_labels,
+    ggplot2::aes(y = transition_display, x = label_x, label = total_deg),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  ggplot2::scale_fill_manual(values = direction_palette) +
+  ggplot2::scale_x_continuous(labels = function(x) abs(x)) +
+  ggplot2::coord_cartesian(
+    xlim = c(-local_max_deg * 1.08, local_max_deg * 1.28),
+    clip = "off"
+  ) +
+  ggplot2::labs(
+    title = "DEG burden at WWTP-associated local transitions",
+    subtitle = "Numbers indicate total significant DEGs",
+    x = "Number of significant DEGs",
+    y = NULL,
+    fill = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "top",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 9),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 22, 8, 8)
+  )
+
+p_local_burden
+
+# Legacy output name
+save_plot_dual(
+  p_local_burden,
+  plots_dir,
+  "06_local_deg_burden",
+  width = 6.8,
+  height = 4.6,
+  dpi = plot_dpi
+)
+
+# Standalone export for manual assembly
+save_plot_dual(
+  p_local_burden,
+  plots_dir,
+  "Figure4C_local_WWTP_burden_publication",
+  width = 5.0,
+  height = 3.6,
+  dpi = 600
+)
+
+# Optional: keep a compact local effect-size summary in the report
+local_effect_plot_df <- local_summary %>%
+  dplyr::transmute(
+    transition_display = paste0(denominator, "\u2192", numerator),
+    median_abs_lfc_sig,
+    q90_abs_lfc_sig,
+    max_abs_lfc_sig
+  ) %>%
+  dplyr::mutate(
+    transition_display = factor(
+      transition_display,
+      levels = rev(local_transition_levels)
+    )
+  )
+
+local_effect_xmax <- max(local_effect_plot_df$q90_abs_lfc_sig, na.rm = TRUE) * 1.18
+
+p_local_lfc <- ggplot2::ggplot(
+  local_effect_plot_df,
+  ggplot2::aes(y = transition_display)
+) +
+  ggplot2::geom_segment(
+    ggplot2::aes(x = 0, xend = q90_abs_lfc_sig, yend = transition_display),
+    linewidth = 1.0,
+    colour = "grey70"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = q90_abs_lfc_sig),
+    shape = 21,
+    size = 3.1,
+    stroke = 0.8,
+    fill = "white",
+    colour = "black"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = median_abs_lfc_sig),
+    shape = 21,
+    size = 3.9,
+    stroke = 0.8,
+    fill = "grey45",
+    colour = "black"
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, local_effect_xmax), clip = "off") +
+  ggplot2::labs(
+    title = "Effect-size summary at local WWTP-associated transitions",
+    subtitle = "Filled circles: median |log2FC|; open circles: 90th percentile",
+    x = "Absolute shrunken log2 fold change among significant DEGs",
+    y = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "none",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 9),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 18, 8, 8)
+  )
+
+p_local_lfc
+
+save_plot_dual(
+  p_local_lfc,
+  plots_dir,
+  "07_local_effect_size_distribution",
+  width = 6.0,
+  height = 4.2,
+  dpi = plot_dpi
+)
+```
+
+**Interpretation.** The local contrasts show that WWTP-associated transitions coincide with some of the strongest transcriptional discontinuities in the dataset. This is important because it indicates that the river is not structured only by cumulative downstream divergence from HOL01; instead, localized upstream–downstream changes around specific transitions also contribute strongly to the molecular landscape. The local summaries therefore identify focal points where transcriptomic restructuring appears especially abrupt.
+
+# 15b. MA plots for local contrasts
+
+These MA plots help assess how local upstream–downstream changes are distributed across the expression range.
+
+```{r local_ma_plots, fig.width=8, fig.height=6}
+if (nrow(local_summary) > 0) {
+  for (i in seq_len(nrow(local_summary))) {
+    contrast_i <- as.character(local_summary$contrast[i])
+    res_i <- contrast_results_list[[contrast_i]]
+    contrast_dirs <- get_contrast_dirs(contrast_i)
+
+    p_ma_i <- make_ma_plot(
+      res_df = res_i,
+      title_text = paste0("MA plot: ", contrast_i),
+      lfc_line = lfc_sig_threshold
+    )
+
+    print(p_ma_i)
+
+    save_plot_dual(
+      p_ma_i,
+      contrast_dirs$plots,
+      paste0("MA_", contrast_i),
+      width = 8,
+      height = 6,
+      dpi = plot_dpi
+    )
+  }
+}
+```
+
+# 15c. Volcano plots for local upstream–downstream contrasts
+
+These volcano plots provide a compact view of the local WWTP-associated transitions by showing which genes combine strong statistical support with large shrunken effect sizes. They are particularly helpful for visually comparing the sharpness and asymmetry of local transcriptional disruption among WWTP-relevant contrasts.
+
+```{r local_volcano_plots, fig.width=8, fig.height=6}
+if (nrow(local_summary) > 0) {
+  for (i in seq_len(nrow(local_summary))) {
+    contrast_i <- as.character(local_summary$contrast[i])
+    res_i <- contrast_results_list[[contrast_i]]
+    contrast_dirs <- get_contrast_dirs(contrast_i)
+
+    p_volcano_i <- make_volcano_plot(
+      res_df = res_i,
+      title_text = paste0("Volcano plot: ", contrast_i),
+      alpha = alpha_padj,
+      lfc_cutoff = lfc_sig_threshold,
+      max_labels = 12
+    )
+
+    print(p_volcano_i)
+
+    save_plot_dual(
+      p_volcano_i,
+      contrast_dirs$plots,
+      paste0("Volcano_", contrast_i),
+      width = 8,
+      height = 6,
+      dpi = plot_dpi
+    )
+  }
+}
+```
+
+**Interpretation.** The local MA and volcano plots indicate that the WWTP-associated transitions are not simply high-burden duplicates of one another. Instead, they differ in symmetry, directionality, and overall response shape. This suggests that local transcriptomic disruption is strong at more than one transition point, but that the biology of these shifts is not identical. That distinction is useful for later pathway interpretation, because it argues against treating all WWTP-associated effects as a single homogeneous phenomenon.
+
+# 15d. Contrast-specific DEG heatmaps and cluster profiles for local contrasts
+
+Local upstream–downstream contrasts are especially useful for identifying localized transcriptional disruption at WWTP-associated transitions. As for the downstream-vs-reference contrasts, we generate contrast-specific DEG heatmaps and clustered profile outputs using only the samples directly involved in each local comparison.
+
+```{r local_heatmaps_and_clusters, fig.width=8, fig.height=10}
+local_pattern_summary <- list()
+
+if (nrow(local_summary) > 0) {
+  for (i in seq_len(nrow(local_summary))) {
+    contrast_i <- as.character(local_summary$contrast[i])
+    numerator_i <- as.character(local_summary$numerator[i])
+    denominator_i <- as.character(local_summary$denominator[i])
+
+    contrast_dirs <- get_contrast_dirs(contrast_i)
+    res_i <- contrast_results_list[[contrast_i]]
+
+    pattern_obj <- prepare_contrast_pattern_data(
+      res_df = res_i,
+      vst_mat = vst_degord_mat,
+      meta_df = meta,
+      numerator = numerator_i,
+      denominator = denominator_i,
+      max_pattern_genes = max_deg_pattern_genes
+    )
+
+    if (!is.null(pattern_obj)) {
+      plot_contrast_deg_heatmap(
+        pattern_obj = pattern_obj,
+        contrast_label = contrast_i,
+        outdir = contrast_dirs$plots,
+        max_display_genes = max_heatmap_display_genes
+      )
+
+      cl_obj <- cluster_and_export_profiles(
+        pattern_obj = pattern_obj,
+        contrast_label = contrast_i,
+        numerator = numerator_i,
+        denominator = denominator_i,
+        outdir_tables = contrast_dirs$tables,
+        outdir_plots = contrast_dirs$plots,
+        annotation_df = annotation_gene,
+        ptree = ptree_percent
+      )
+
+      local_pattern_summary[[contrast_i]] <- data.frame(
+        contrast = contrast_i,
+        n_sig_genes_available = nrow(res_i %>% dplyr::filter(significant)),
+        n_genes_used_for_patterns = nrow(pattern_obj$z_mat),
+        n_clusters = if (is.null(cl_obj)) NA_integer_ else length(unique(cl_obj$cluster_df$cluster)),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+}
+
+if (length(local_pattern_summary) > 0) {
+  local_pattern_summary_df <- dplyr::bind_rows(local_pattern_summary)
+  write_table_safe(local_pattern_summary_df, tables_dir, "local_contrast_pattern_summary.csv")
+
+  knitr::kable(
+    local_pattern_summary_df,
+    caption = "Summary of contrast-specific DEG heatmaps and cluster-profile outputs for local upstream–downstream contrasts.",
+    row.names = FALSE
+  )
+}
+```
+
+**Interpretation.** The local heatmaps and cluster profiles again show that these transitions involve multi-module responses rather than simple downstream shifts. Local WWTP-associated differences therefore appear to reorganize several transcriptional programs simultaneously. This makes them especially informative contrasts for the next functional stage of the manuscript, because they likely capture focused molecular transitions rather than only diffuse cumulative divergence.
+
+# 16. Prioritizing contrasts for pathway-level interpretation
+
+To guide downstream functional analysis, it is useful to rank contrasts by both DEG burden and effect-size strength. Contrasts with many DEGs and relatively large shrunken effect sizes are often the most informative starting points for pathway-level interpretation.
+
+```{r prioritize_contrasts}
+contrast_priority <- contrast_summary %>%
+  dplyr::mutate(
+    priority_score = n_significant * ifelse(is.na(median_abs_lfc_sig), 0, median_abs_lfc_sig)
+  ) %>%
+  dplyr::arrange(dplyr::desc(priority_score), dplyr::desc(n_significant))
+
+write_table_safe(contrast_priority, tables_dir, "contrast_priority_table.csv")
+
+knitr::kable(
+  contrast_priority,
+  digits = 3,
+  caption = "Contrast ranking table to prioritize pathway-level interpretation.",
+  row.names = FALSE
+)
+```
+
+```{r prioritize_plot, fig.width=8, fig.height=5}
+p_priority <- ggplot2::ggplot(
+  contrast_priority,
+  ggplot2::aes(
+    x = n_significant,
+    y = median_abs_lfc_sig,
+    colour = comparison_class,
+    label = contrast
+  )
+) +
+  ggplot2::geom_point(size = 3, alpha = 0.9) +
+  ggrepel::geom_text_repel(size = 3, max.overlaps = Inf, show.legend = FALSE) +
+  ggplot2::labs(
+    title = "Contrast prioritization for downstream pathway analysis",
+    x = "Number of significant DEGs",
+    y = "Median absolute shrunken log2 fold change",
+    colour = "Contrast class"
+  ) +
+  ggplot2::theme_bw()
+
+p_priority
+save_plot_dual(p_priority, plots_dir, "08_contrast_prioritization", width = 8, height = 5, dpi = plot_dpi)
+```
+
+**Interpretation.** The ranking analysis identifies the contrasts that combine broad DEG burden with appreciable effect sizes and are therefore the strongest candidates for downstream enrichment analysis. Importantly, the highest-priority comparisons are not necessarily confined to one framework; some are informative because they capture downstream divergence from the reference, while others are compelling because they represent localized transition points. This supports using a contrast-specific, rather than pooled, functional interpretation strategy.
+
+## Overall interpretation
+
+Overall, the differential-expression analysis shows that transcriptomic disruption along the Holtemme gradient is real, spatially structured, and clearly non-monotonic. The strongest responses do not occur simply at the farthest downstream positions, but at specific stations and transitions, including comparisons that coincide with WWTP-associated local shifts. At the same time, the shared-versus-unique DEG analyses indicate that downstream differences are not fully independent from one another: a common transcriptional backbone is detectable across multiple contrasts, but it is overlaid by substantial contrast-specific structure.
+
+In combination with the earlier global transcriptome-structure analysis, these results support a model in which the Holtemme system is shaped by both broader downstream differentiation and discrete local transcriptomic restructurings. This provides a strong basis for moving to contrast-specific functional analysis rather than treating the entire river as one uniform molecular gradient.
+
+# 17. Interpretation notes for manuscript writing
+
+This report is intended to support the Results section by making several points directly accessible:
+
+* where DEG burden is greatest along the gradient,
+* whether responses are dominated by up- or down-regulation,
+* whether downstream sites share a common DEG core or respond more idiosyncratically,
+* whether local WWTP-associated transitions produce especially strong transcriptional disruption,
+* how the DEG-focused expression space recapitulates or sharpens the station organization previously observed in the full expression matrix,
+* whether the DEG responses within each contrast form coherent sample-level and gene-level patterns,
+* which contrasts should be prioritized for pathway-level interpretation,
+* and which exact DESeq2-tested universes and DEG vectors should be carried forward into Results 5.
+
+A useful writing sequence for the manuscript is:
+
+1. describe all downstream-vs-reference contrasts and highlight where DEG burden is strongest,
+2. summarize effect-size distributions and whether responses become stronger or weaker along the gradient,
+3. use MA and volcano plots to characterize the shape of each response,
+4. distinguish shared versus site-specific DEG patterns,
+5. describe the DEG-based ordination explicitly as a **post hoc check** that recapitulates or sharpens station organization,
+6. move to local upstream–downstream contrasts around WWTP-associated sites,
+7. use contrast-specific heatmaps and cluster-profile outputs to assess how internally coherent each response is,
+8. close by identifying the contrasts selected for pathway-level analysis,
+9. and then use the exported Results 5 seed layer as the exact DE-derived input for GOseq.
+
+## 18. Publication figure panels for Objective 3
+
+```{r publication_panels_objective3, fig.width=11, fig.height=9, warning=FALSE, message=FALSE}
+# Standalone publication panels for Objective 3
+# This chunk does not alter any upstream objects used elsewhere in the script.
+# It only reads contrast_summary and writes high-resolution PNG/PDF files to plots_dir.
+
+# ------------------------------------------------------------------
+# 18a. Prepare combined summary table for publication panels
+# ------------------------------------------------------------------
+
+panel_border_col <- "black"
+panel_border_lwd <- 0.30
+
+direction_palette <- c(
+  "Down in numerator" = "#C44E52",
+  "Up in numerator"   = "#4C72B0"
+)
+
+# River-logic order:
+# all HOL01 reference contrasts, with HOL05_vs_HOL04 inserted at its biological position
+figure4_order <- c(
+  "HOL02_vs_HOL01",
+  "HOL03_vs_HOL01",
+  "HOL04_vs_HOL01",
+  "HOL05_vs_HOL04",
+  "HOL05_vs_HOL01",
+  "HOL06_vs_HOL01"
+)
+
+fig4_summary <- contrast_summary %>%
+  dplyr::filter(contrast %in% figure4_order) %>%
+  dplyr::mutate(
+    plot_rank = match(contrast, figure4_order),
+    contrast_type = dplyr::case_when(
+      is_reference_contrast & is_local_contrast ~ "both",
+      is_local_contrast ~ "local_only",
+      TRUE ~ "reference_only"
+    ),
+    contrast_display = dplyr::case_when(
+      contrast_type == "both" ~ paste0(unname(contrast_label_map[contrast]), " *"),
+      contrast_type == "local_only" ~ paste0(unname(contrast_label_map[contrast]), " \u2020"),
+      TRUE ~ unname(contrast_label_map[contrast])
+    )
+  ) %>%
+  dplyr::arrange(plot_rank)
+
+knitr::kable(
+  fig4_summary %>%
+    dplyr::select(
+      contrast, contrast_type,
+      n_significant, n_up_in_numerator, n_down_in_numerator,
+      median_abs_lfc_sig, q90_abs_lfc_sig, max_abs_lfc_sig
+    ),
+  digits = 3,
+  caption = "Summary table used to build the publication panels for Objective 3.",
+  row.names = FALSE
+)
+
+# local export helper so we do not depend on whichever save_plot_dual version is active
+export_dual_plot <- function(plot_obj, filename_stub, width, height, dpi = 600) {
+  ggplot2::ggsave(
+    filename = file.path(plots_dir, paste0(filename_stub, ".png")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+  ggplot2::ggsave(
+    filename = file.path(plots_dir, paste0(filename_stub, ".pdf")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+}
+
+# Shared y-axis order
+fig4_display_levels <- fig4_summary$contrast_display
+
+# ------------------------------------------------------------------
+# 18b. Panel A — DEG burden
+# ------------------------------------------------------------------
+
+fig4_burden_long <- fig4_summary %>%
+  dplyr::select(
+    contrast, contrast_display, contrast_type,
+    n_significant, n_up_in_numerator, n_down_in_numerator
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(n_up_in_numerator, n_down_in_numerator),
+    names_to = "direction",
+    values_to = "n_deg"
+  ) %>%
+  dplyr::mutate(
+    plot_value = ifelse(direction == "n_down_in_numerator", -n_deg, n_deg),
+    direction = dplyr::recode(
+      direction,
+      n_up_in_numerator   = "Up in numerator",
+      n_down_in_numerator = "Down in numerator"
+    ),
+    contrast_display = factor(contrast_display, levels = rev(fig4_display_levels))
+  )
+
+fig4_max_deg <- max(
+  c(fig4_summary$n_up_in_numerator, fig4_summary$n_down_in_numerator),
+  na.rm = TRUE
+)
+
+fig4_total_labels <- fig4_summary %>%
+  dplyr::transmute(
+    contrast_display,
+    total_deg = n_significant,
+    label_x = fig4_max_deg * 1.11
+  ) %>%
+  dplyr::mutate(
+    contrast_display = factor(contrast_display, levels = rev(fig4_display_levels))
+  )
+
+p_fig4A <- ggplot2::ggplot(
+  fig4_burden_long,
+  ggplot2::aes(y = contrast_display, x = plot_value, fill = direction)
+) +
+  ggplot2::geom_col(width = 0.72) +
+  ggplot2::geom_vline(xintercept = 0, linewidth = 0.45, colour = "grey35") +
+  ggplot2::geom_text(
+    ggplot2::aes(
+      label = n_deg,
+      x = plot_value / 2
+    ),
+    colour = "white",
+    fontface = "bold",
+    size = 3.3
+  ) +
+  ggplot2::geom_text(
+    data = fig4_total_labels,
+    ggplot2::aes(y = contrast_display, x = label_x, label = total_deg),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3.4,
+    fontface = "bold"
+  ) +
+  ggplot2::scale_fill_manual(values = direction_palette) +
+  ggplot2::scale_x_continuous(labels = function(x) abs(x)) +
+  ggplot2::coord_cartesian(
+    xlim = c(-fig4_max_deg * 1.08, fig4_max_deg * 1.30),
+    clip = "off"
+  ) +
+  ggplot2::labs(
+    title = "DEG burden along the gradient and at key WWTP transitions",
+    subtitle = "* first downstream-vs-reference contrast and local WWTP transition; \u2020 local WWTP transition only; numbers inside bars = up/down DEGs; numbers at right = total DEGs",
+    x = "Number of significant DEGs",
+    y = NULL,
+    fill = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "top",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 8.7),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 28, 8, 8)
+  )
+
+p_fig4A
+
+ggplot2::ggsave(
+  filename = file.path(plots_dir, "Figure4A_DEG_burden_gradient_plus_WWTP_publication.png"),
+  plot = p_fig4A,
+  width = 6.6,
+  height = 4.8,
+  dpi = 600
+)
+
+ggplot2::ggsave(
+  filename = file.path(plots_dir, "Figure4A_DEG_burden_gradient_plus_WWTP_publication.pdf"),
+  plot = p_fig4A,
+  width = 6.6,
+  height = 4.8,
+  dpi = 600
+)
+
+# ------------------------------------------------------------------
+# 18c. Panel B — effect-size summary
+# ------------------------------------------------------------------
+
+fig4_effect_df <- fig4_summary %>%
+  dplyr::transmute(
+    contrast,
+    contrast_display,
+    contrast_type,
+    median_abs_lfc_sig,
+    q90_abs_lfc_sig,
+    max_abs_lfc_sig
+  ) %>%
+  dplyr::mutate(
+    contrast_display = factor(contrast_display, levels = rev(fig4_display_levels))
+  )
+
+fig4_effect_xmax <- max(fig4_effect_df$q90_abs_lfc_sig, na.rm = TRUE) * 1.18
+
+p_fig4B <- ggplot2::ggplot(
+  fig4_effect_df,
+  ggplot2::aes(y = contrast_display)
+) +
+  ggplot2::geom_segment(
+    ggplot2::aes(x = 0, xend = q90_abs_lfc_sig, yend = contrast_display),
+    linewidth = 1.0,
+    colour = "grey70"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = q90_abs_lfc_sig),
+    shape = 21,
+    size = 3.2,
+    stroke = 0.8,
+    fill = "white",
+    colour = "black"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(x = median_abs_lfc_sig),
+    shape = 21,
+    size = 4.1,
+    stroke = 0.8,
+    fill = "grey45",
+    colour = "black"
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, fig4_effect_xmax), clip = "off") +
+  ggplot2::labs(
+    title = "Effect-size summary across the same contrasts",
+    subtitle = "Filled circles = median |shrunken log2FC|; open circles = 90th percentile",
+    x = "Absolute shrunken log2 fold change among significant DEGs",
+    y = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "none",
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(colour = "grey92", linewidth = 0.3),
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 8.7),
+    axis.title = ggplot2::element_text(face = "bold"),
+    axis.text.y = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 18, 8, 8)
+  )
+
+p_fig4B
+
+ggplot2::ggsave(
+  filename = file.path(plots_dir, "Figure4B_effect_size_gradient_plus_WWTP_publication.png"),
+  plot = p_fig4B,
+  width = 3.8,
+  height = 5.9,
+  dpi = 600
+)
+
+ggplot2::ggsave(
+  filename = file.path(plots_dir, "Figure4B_effect_size_gradient_plus_WWTP_publication.pdf"),
+  plot = p_fig4B,
+  width = 3.8,
+  height = 5.9,
+  dpi = 600
+)
+```
+
+# 19. Session information
+
+```{r session_info}
+capture.output(sessionInfo(), file = file.path(logs_dir, "sessionInfo.txt"))
+sessionInfo()
+```
+
+```

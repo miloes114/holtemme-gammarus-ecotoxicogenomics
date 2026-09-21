@@ -1,0 +1,40 @@
+Package: holtemmeGammarusWorkflow
+Title: Holtemme Gammarus Ecotoxicogenomics Workflow
+Version: 1.0.0
+Description: Reproducibility metadata for the Holtemme Gammarus pulex field ecotoxicogenomics workflow.
+Authors@R: person("Camilo", "Escobar-Sierra", role = c("aut", "cre"))
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Imports:
+    AnnotationDbi,
+    Biostrings,
+    DESeq2,
+    digest,
+    dplyr,
+    EchoGO,
+    EnhancedVolcano,
+    ggplot2,
+    ggrepel,
+    GO.db,
+    goseq,
+    knitr,
+    matrixStats,
+    patchwork,
+    pheatmap,
+    purrr,
+    readr,
+    readxl,
+    RColorBrewer,
+    rmarkdown,
+    scales,
+    shiny,
+    stringr,
+    SummarizedExperiment,
+    svglite,
+    tibble,
+    tidyr,
+    vegan,
+    WGCNA
+
+

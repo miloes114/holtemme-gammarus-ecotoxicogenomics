@@ -1,0 +1,8 @@
+resource_id	resource_type	citation_or_title	identifier	version_or_accession	locally_required	expected_local_destination	redistribution_status	checksum_sha256
+EXT_CHEMISTRY	external_authoritative_source	Weichert et al. 2026. Micropollutant concentrations in the Holtemme River (LC-HRMS direct injection, October 2021).	10.5281/zenodo.22143080		No		referenced_not_duplicated
+EXT_RNASEQ	external_authoritative_source	Raw RNA-seq reads.	SRP571512		No		referenced_not_duplicated
+EXT_TRANSCRIPTOME	external_authoritative_source	Published Gammarus pulex transcriptome and annotation resources (Escobar-Sierra et al. 2025).		not_recorded_in_current_source	Yes	03_reference/	pending_source_citation_confirmation
+DEP_ECHOGO	software_dependency	EchoGO background-aware multi-context enrichment.	https://github.com/miloes114/EchoGo	0.1.4; commit dcf41371b20cccb2914852dc2c0436ecba62c559	Yes	renv-managed package	pinned_external_dependency
+
+
+

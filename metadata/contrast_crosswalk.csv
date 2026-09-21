@@ -1,0 +1,7 @@
+contrast_id,numerator_site,denominator_site,numerator_tag,denominator_tag,display_label,contrast_role,manuscript_context
+HOL02_vs_HOL01,HOL02,HOL01,H3,H2,H3 vs H2,gradient_reference_and_local_transition,first local WWTP transition and first downstream reference contrast
+HOL03_vs_HOL01,HOL03,HOL01,H4,H2,H4 vs H2,gradient_reference_comparison,intermediate downstream divergence from reference
+HOL04_vs_HOL01,HOL04,HOL01,H5,H2,H5 vs H2,gradient_reference_comparison,stronger downstream divergence before the second WWTP step
+HOL05_vs_HOL01,HOL05,HOL01,H6,H2,H6 vs H2,gradient_reference_comparison,downstream reference comparison at the second WWTP transition
+HOL05_vs_HOL04,HOL05,HOL04,H6,H5,H6 vs H5,local_wwtp_transition,local Halberstadt WWTP transition
+HOL06_vs_HOL01,HOL06,HOL01,H7,H2,H7 vs H2,integrative_downstream_transition,furthest downstream reference comparison

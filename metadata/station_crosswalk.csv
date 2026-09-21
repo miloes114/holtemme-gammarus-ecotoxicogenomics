@@ -1,0 +1,7 @@
+legacy_site_id,station_tag,station_order,chemistry_series_order,display_label,site_name,site_context,chemistry_status
+HOL01,H2,1,2,H2,UPS Silstedt,reference and upstream site,chemistry_available
+HOL02,H3,2,3,H3,DS Silstedt,first local WWTP transition,chemistry_available
+HOL03,H4,3,4,H4,Mahndorf,intermediate downstream site,chemistry_available
+HOL04,H5,4,5,H5,UPS Halberstadt,upstream Halberstadt site,chemistry_available
+HOL05,H6,5,6,H6,DS Halberstadt,second local WWTP transition,chemistry_available
+HOL06,H7,6,7,H7,Nienhagen,furthest downstream site,chemistry_pending_or_partial

@@ -1,0 +1,31 @@
+args <- commandArgs(trailingOnly = TRUE)
+project_dir <- normalizePath(Sys.getenv("HOLTEMME_PROJECT_DIR", unset = getwd()), winslash = "/", mustWork = TRUE)
+checks <- list()
+add_check <- function(name, passed, detail) checks[[length(checks) + 1L]] <<- list(name = name, passed = isTRUE(passed), detail = detail)
+steps <- utils::read.delim(file.path(project_dir, "config", "workflow_steps.tsv"), stringsAsFactors = FALSE, check.names = FALSE)
+expected_sources <- sprintf("%02d_Holtemme_", 1:8)
+source_files <- list.files(project_dir, pattern = "^0[1-8]_Holtemme_.*\\.Rmd$", full.names = FALSE)
+report_files <- list.files(file.path(project_dir, "reports"), pattern = "^0[1-8]_Holtemme_.*\\.html$", full.names = FALSE)
+add_check("eight_sources", length(source_files) == 8L && nrow(steps) == 8L && all(steps$source %in% source_files), paste(length(source_files), "sources;", nrow(steps), "workflow rows"))
+add_check("eight_reports", length(report_files) == 8L && !length(list.files(project_dir, pattern = "^0[1-8]_Holtemme_.*\\.html$")), paste(length(report_files), "reports under reports/"))
+required_metadata <- c("station_crosswalk.csv", "contrast_crosswalk.csv", "holtemme_sample_metadata_publication.csv", "holtemme_chemistry_site_metrics.csv")
+add_check("compact_metadata", all(file.exists(file.path(project_dir, "metadata", required_metadata))), paste(required_metadata, collapse = ", "))
+station <- utils::read.csv(file.path(project_dir, "metadata", "station_crosswalk.csv"), stringsAsFactors = FALSE)
+add_check("site_crosswalk", identical(as.character(station$station_tag), paste0("H", 2:7)) && identical(as.character(station$legacy_site_id), sprintf("HOL%02d", 1:6)), "HOL01-HOL06 map to H2-H7")
+scaffolds <- c("data_manifest.tsv", "external_resources.tsv", "plot_registry.tsv", "publication_artifact_registry.tsv", "publication_release.tsv", "zenodo_deposit_manifest.tsv")
+add_check("release_scaffolds", all(file.exists(file.path(project_dir, "config", scaffolds))), paste(scaffolds, collapse = ", "))
+add_check("no_bulk_results", !length(list.dirs(project_dir, recursive = FALSE, full.names = FALSE)[grepl("^Results_", list.dirs(project_dir, recursive = FALSE, full.names = FALSE))]), "No Results_* directories in GitHub clone")
+add_check("no_installed_library", !dir.exists(file.path(project_dir, "environment", "R-library")), "No platform-specific R library")
+add_check("renv_lock", file.exists(file.path(project_dir, "renv.lock")), "renv.lock present")
+scan_dirs <- c(project_dir, file.path(project_dir, "config"), file.path(project_dir, "docs"), file.path(project_dir, "scripts"), file.path(project_dir, "support"), file.path(project_dir, "metadata"), file.path(project_dir, "reports"))
+text_files <- unlist(lapply(scan_dirs, function(d) list.files(d, recursive = TRUE, full.names = TRUE, pattern = "\\.(Rmd|R|ps1|md|tsv|csv|cff)$")), use.names = FALSE)
+text_files <- text_files[basename(text_files) != "validate_project.R"]
+absolute_hits <- unlist(lapply(text_files, function(f) { x <- readLines(f, warn = FALSE, encoding = "UTF-8"); if (any(grepl("[A-Za-z]:[/\\\\](Users|Documents|Desktop)|C:/Users|G:/Holtemme|H:/", x))) basename(f) else NULL }), use.names = FALSE)
+add_check("no_user_absolute_paths", !length(absolute_hits), if(length(absolute_hits)) paste(unique(absolute_hits), collapse = ", ") else "No user-specific absolute paths in source/config/docs/metadata")
+large <- list.files(project_dir, recursive = TRUE, full.names = TRUE); large <- large[file.info(large)$isdir %in% FALSE]; large <- large[file.info(large)$size >= 100 * 1024^2]
+add_check("no_files_ge_100MiB", !length(large), if(length(large)) paste(basename(large), collapse = ", ") else "No file at or above 100 MiB")
+for (check in checks) cat(if (check$passed) "PASS" else "FAIL", check$name, "-", check$detail, "\n")
+if (any(!vapply(checks, `[[`, logical(1), "passed"))) quit(status = 1L, save = "no")
+
+
+

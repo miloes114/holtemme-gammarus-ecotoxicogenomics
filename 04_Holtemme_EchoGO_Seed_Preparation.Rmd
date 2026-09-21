@@ -1,0 +1,28 @@
+---
+title: "Holtemme GOseq target-enrichment seed preparation"
+author: "Camilo Escobar"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+project_dir <- normalizePath(Sys.getenv("HOLTEMME_PROJECT_DIR", unset = getwd()), winslash = "/")
+handoff <- file.path(project_dir, "Results_04_EchoGO_Seed_Preparation", "echogo_handoff", "manifests", "goseq_echogo_handoff_manifest.csv")
+if (file.exists(handoff)) manifest <- utils::read.csv(handoff, stringsAsFactors = FALSE) else manifest <- data.frame()
+```
+
+# Scope
+
+Step 04 defines the deterministic target GOseq handoff for the six validated
+DESeq2 contrasts. It preserves the tested gene universe, contrast-specific DEG
+foregrounds, median transcript-length bias covariates, primary eggNOG GO
+mapping, and retained sensitivity mappings. The handoff is consumed unchanged
+by the annotation-context evidence layer in Step 05.
+
+```{r handoff}
+if (nrow(manifest)) knitr::kable(manifest, caption = "GOseq-to-EchoGO handoff manifest")
+```
+
+The output is a reproducible seed layer: each contrast retains its tested
+universe, significant foreground, GO identifiers, ontology labels, and source
+hashes. No context requests are made in this step.

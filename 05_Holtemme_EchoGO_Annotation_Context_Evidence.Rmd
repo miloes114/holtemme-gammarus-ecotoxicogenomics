@@ -1,0 +1,93 @@
+---
+title: "Holtemme EchoGO annotation-context evidence"
+author: "Camilo Escobar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+project_dir <- normalizePath(Sys.getenv("HOLTEMME_PROJECT_DIR", unset = getwd()), winslash = "/")
+frozen_root <- Sys.getenv("HOLTEMME_ECHOGO_V014_ROOT", unset = "")
+if (!nzchar(frozen_root)) frozen_root <- file.path(project_dir, "support", "echogo_v014_end_to_end")
+frozen_root <- gsub("\\\\", "/", frozen_root)
+read_tsv_frozen <- function(path) {
+  if (!file.exists(path)) return(data.frame())
+  utils::read.delim(path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE,
+                    na.strings = c("", "NA"))
+}
+inventory <- read_tsv_frozen(file.path(frozen_root, "semantic", "integrated_semantic_feature_inventory.tsv"))
+software <- read_tsv_frozen(file.path(frozen_root, "software", "echogo_v014_provenance.tsv"))
+summary_file <- file.path(frozen_root, "profiles", "echogo_v014_final_evidence_summary.tsv")
+summary <- read_tsv_frozen(summary_file)
+if (!nrow(summary)) {
+  summary <- data.frame(metric = c("target_exact", "target_only", "target_plus_context",
+    "matched_background_exact", "exploratory_returned", "exploratory_qualifying", "exploratory_excluded"),
+    value = c(643, 641, 2, 24, 7741, 588, 7153))
+}
+```
+
+# Analytical scope
+
+This report describes the definitive annotation-context evidence layer for the
+six Holtemme differential-expression contrasts. It consumes frozen, validated
+EchoGO 0.1.4 request/result material and does not make live network requests.
+The target GOseq enrichment prepared in Step 04 is the primary evidence anchor.
+Context recovery is reported as annotation-context provenance and hypothesis
+generation, not as independent biological replication or proof of conservation.
+
+# Software and resolver contract
+
+EchoGO 0.1.4 uses a deterministic portable-name resolver with priority
+Swiss-Prot gene symbol, eggNOG preferred name, and portable native symbol. The
+common experiment-derived background contains 7,030 portable names. The six
+contexts are *Caenorhabditis elegans*, *Drosophila melanogaster*, *Daphnia
+magna*, *Hyalella azteca*, *Daphnia pulex*, and *Procambarus clarkii* using the
+validated context codes `celegans`, `dmelanogaster`, `dmgca020631705v2`,
+`hagca000764305v2`, `dpgca021134715v1rs`, and `pcgca020424385v2`.
+
+```{r software-table}
+if (nrow(software)) knitr::kable(software, caption = "EchoGO software provenance")
+```
+
+# Request and evidence summary
+
+The frozen custom-background stream contains 36 contrast-by-context requests:
+23 result-bearing requests, 13 explicit no-result requests, and zero failures.
+The manuscript evidence profile contains 643 exact target terms (641
+`TARGET_ONLY` and two `TARGET_PLUS_CONTEXT`, GO:0005576 and GO:0005615) and 24
+matched-background alternative-context terms. The default-domain exploratory
+stream contains 7,741 returned rows, of which 588 are source-local FDR-qualified
+and 7,153 are excluded from qualifying evidence.
+
+```{r evidence-table}
+if (nrow(summary)) knitr::kable(summary, caption = "Frozen evidence counts")
+```
+
+# Semantic reduction and handoff
+
+RRvGO Rel semantic reduction uses `org.Dm.eg.db` as the declared semantic proxy.
+Exact GO evidence is retained independently of semantic representability. Current
+identifiers remain current; obsolete identifiers are mapped to exact current
+replacements where available, and obsolete terms without exact replacements or
+current terms unrepresented in the proxy are recorded separately. The frozen
+integrated inventory contains 248 semantic features: 120 target-supported, 10
+matched-background, and 118 default-domain exploratory features.
+
+```{r inventory-summary}
+if (nrow(inventory)) {
+  counts <- as.data.frame(table(inventory$integrated_evidence_tier),
+                          stringsAsFactors = FALSE)
+  names(counts) <- c("evidence_tier", "feature_count")
+  knitr::kable(counts, caption = "Integrated semantic-feature inventory")
+}
+```
+
+All downstream functional-family assignments and Figure 4 cells are frozen in
+the Step 06 canonical tables. The target-only S5 selection is frozen separately
+and retains 16 genes. This report is intentionally network-free during normal
+rendering; only validated local files are read.

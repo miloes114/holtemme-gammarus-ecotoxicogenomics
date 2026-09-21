@@ -1,0 +1,709 @@
+---
+title: "Holtemme chemistry–transcriptome integration"
+author: "Camilo Escobar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+# Analytical scope
+
+This report characterises the Holtemme chemical-exposure gradient and tests one
+predeclared transcriptome-wide association: whether site-centroid expression is
+linearly aligned with total predicted chronic mixture pressure,
+`log10_STU_ToxC`. Chemical-specific and mode-of-action (MoA) profiles describe
+exposure composition but are not treated as parallel transcriptomic predictors.
+
+The response contains every gene with nonzero variance across the 30 RNA-seq
+libraries. This universe was selected because the prior gene-universe
+sensitivity analysis gave the same nominal conclusion for all tested universes
+and retained the all-gene site geometry (minimum distance correlation 0.915).
+All five nonzero site-centroid principal components preserve the six-site
+geometry exactly. Inference enumerates all 720 permutations of the chemistry
+predictor. Coexpression-network construction is intentionally reserved for
+Steps 07 and 08.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+options(stringsAsFactors = FALSE)
+set.seed(1207)
+
+project_dir <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+source(file.path(project_dir, "support", "workflow_helpers.R"))
+sync_rstudio_pandoc()
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(purrr)
+  library(stringr)
+  library(ggplot2)
+  library(matrixStats)
+  library(vegan)
+})
+
+results_dir <- make_results_dir(
+  project_dir, 2, "Chemistry_Transcriptome_Integration"
+)
+tables_dir <- file.path(results_dir, "tables")
+plots_dir <- file.path(results_dir, "plots")
+logs_dir <- file.path(results_dir, "logs")
+chem_tables_dir <- file.path(tables_dir, "chemistry")
+ordination_tables_dir <- file.path(tables_dir, "constrained_ordination")
+chem_plots_dir <- file.path(plots_dir, "chemistry")
+ordination_plots_dir <- file.path(plots_dir, "constrained_ordination")
+invisible(lapply(
+  c(
+    results_dir, tables_dir, plots_dir, logs_dir, chem_tables_dir,
+    ordination_tables_dir, chem_plots_dir, ordination_plots_dir
+  ),
+  dir.create,
+  recursive = TRUE,
+  showWarnings = FALSE
+))
+
+vst_file <- file.path(
+  project_dir, "Results_01_Global_Transcriptome_Structure",
+  "matrices", "vst_matrix_germany.tsv"
+)
+metadata_file <- file.path(
+  project_dir, "Results_01_Global_Transcriptome_Structure",
+  "tables", "metadata_matched_germany.csv"
+)
+station_file <- file.path(project_dir, "metadata", "station_crosswalk.csv")
+stu_file <- file.path(project_dir, "02_inputs", "STU_log10STU_per_site.tsv")
+chemical_file <- file.path(project_dir, "02_inputs", "TU_per_site-chemical.tsv")
+moa_file <- file.path(project_dir, "02_inputs", "TU_per_site-MoA.tsv")
+chemistry_seed_file <- file.path(
+  project_dir, "metadata", "holtemme_chemistry_site_metrics.csv"
+)
+
+required_inputs <- c(
+  vst_file, metadata_file, station_file, stu_file, chemical_file, moa_file
+)
+if (!all(file.exists(required_inputs))) {
+  stop(
+    "Missing required Step 02 inputs:\n",
+    paste(required_inputs[!file.exists(required_inputs)], collapse = "\n")
+  )
+}
+
+site_order <- paste0("H", 1:7)
+transcriptomic_sites <- paste0("H", 2:7)
+
+write_csv_safe <- function(x, path) {
+  readr::write_csv(x, path, na = "")
+  invisible(path)
+}
+
+save_plot_bundle <- function(plot, stem, width = 8, height = 5.5) {
+  ggplot2::ggsave(
+    paste0(stem, ".png"), plot, width = width, height = height,
+    dpi = 320, bg = "white"
+  )
+  ggplot2::ggsave(
+    paste0(stem, ".pdf"), plot, width = width, height = height,
+    bg = "white"
+  )
+  invisible(stem)
+}
+
+theme_publication <- function(base_size = 11) {
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(face = "bold"),
+      axis.title = ggplot2::element_text(face = "bold")
+    )
+}
+```
+
+# 1. Chemistry harmonisation
+
+```{r chemistry-harmonisation}
+station_tbl <- readr::read_csv(station_file, show_col_types = FALSE)
+station_lookup <- station_tbl %>%
+  dplyr::transmute(
+    legacy_site = as.character(.data$legacy_site_id),
+    station_tag = as.character(.data$station_tag),
+    station_order = as.integer(.data$station_order),
+    site_name = as.character(.data$site_name)
+  )
+
+stu <- readr::read_tsv(stu_file, show_col_types = FALSE) %>%
+  dplyr::transmute(
+    site = as.character(.data$Site),
+    STU_ToxC = as.numeric(.data$STU_ToxC),
+    log10_STU_ToxC = as.numeric(.data$log10_STU_ToxC)
+  )
+
+chemical_long <- readr::read_tsv(
+  chemical_file, show_col_types = FALSE
+) %>%
+  dplyr::transmute(
+    site = as.character(.data$sites),
+    chemical = as.character(.data$chemical_name),
+    moa = as.character(.data$MoA_broad_01),
+    iTU = as.numeric(.data$iTU)
+  ) %>%
+  dplyr::group_by(.data$site, .data$chemical, .data$moa) %>%
+  dplyr::summarise(iTU = sum(.data$iTU, na.rm = TRUE), .groups = "drop")
+
+moa_long <- readr::read_tsv(moa_file, show_col_types = FALSE) %>%
+  dplyr::transmute(
+    site = as.character(.data$sites),
+    moa = stringr::str_squish(as.character(.data$MoA_broad_01)),
+    total_TU = as.numeric(.data$total_TU)
+  ) %>%
+  dplyr::group_by(.data$site, .data$moa) %>%
+  dplyr::summarise(total_TU = sum(.data$total_TU, na.rm = TRUE), .groups = "drop")
+
+positive_itu <- chemical_long$iTU[chemical_long$iTU > 0]
+itu_pseudocount <- min(positive_itu, na.rm = TRUE) / 2
+chemical_wide <- tidyr::expand_grid(
+  site = site_order,
+  chemical = sort(unique(chemical_long$chemical))
+) %>%
+  dplyr::left_join(
+    chemical_long %>%
+      dplyr::group_by(.data$site, .data$chemical) %>%
+      dplyr::summarise(iTU = sum(.data$iTU), .groups = "drop"),
+    by = c("site", "chemical")
+  ) %>%
+  dplyr::mutate(
+    iTU = dplyr::coalesce(.data$iTU, 0),
+    log_iTU = log10(.data$iTU + itu_pseudocount)
+  ) %>%
+  dplyr::select(.data$site, .data$chemical, .data$log_iTU) %>%
+  tidyr::pivot_wider(
+    names_from = .data$chemical,
+    values_from = .data$log_iTU
+  ) %>%
+  dplyr::arrange(match(.data$site, site_order))
+
+chemical_pca <- stats::prcomp(
+  chemical_wide %>% dplyr::select(-.data$site),
+  center = TRUE,
+  scale. = TRUE
+)
+chemical_scores <- tibble::as_tibble(
+  chemical_pca$x[, seq_len(min(3L, ncol(chemical_pca$x))), drop = FALSE]
+) %>%
+  dplyr::mutate(site = chemical_wide$site, .before = 1)
+
+moa_wide <- tidyr::expand_grid(
+  site = site_order,
+  moa = sort(unique(moa_long$moa))
+) %>%
+  dplyr::left_join(moa_long, by = c("site", "moa")) %>%
+  dplyr::mutate(total_TU = dplyr::coalesce(.data$total_TU, 0)) %>%
+  tidyr::pivot_wider(
+    names_from = .data$moa,
+    values_from = .data$total_TU,
+    values_fill = 0
+  ) %>%
+  dplyr::arrange(match(.data$site, site_order))
+
+positive_moa <- unlist(moa_wide %>% dplyr::select(-.data$site))
+positive_moa <- positive_moa[positive_moa > 0]
+moa_pseudocount <- min(positive_moa, na.rm = TRUE) / 2
+moa_matrix <- log10(
+  as.matrix(moa_wide %>% dplyr::select(-.data$site)) + moa_pseudocount
+)
+moa_pca <- stats::prcomp(moa_matrix, center = TRUE, scale. = TRUE)
+moa_scores <- tibble::as_tibble(
+  moa_pca$x[, seq_len(min(3L, ncol(moa_pca$x))), drop = FALSE]
+) %>%
+  dplyr::mutate(site = moa_wide$site, .before = 1)
+
+# Deterministic publication exports for the current SI S1/S2 objects.
+# These writes expose the existing objects without changing preprocessing,
+# filtering, PCA definitions, or MoA categories. Original SI composite
+# raster code is not available in this workflow and is therefore not
+# fabricated here; canonical source data are exported instead.
+publication_artifacts_dir <- file.path(results_dir, "publication_artifacts")
+s1_publication_dir <- file.path(publication_artifacts_dir, "Figure_S1")
+s2_publication_dir <- file.path(publication_artifacts_dir, "Figure_S2")
+invisible(lapply(c(s1_publication_dir, s2_publication_dir), dir.create,
+  recursive = TRUE, showWarnings = FALSE
+))
+
+chemical_pca_scores_full <- tibble::as_tibble(chemical_pca$x) %>%
+  dplyr::mutate(site = chemical_wide$site, .before = 1)
+chemical_pca_loadings <- tibble::as_tibble(chemical_pca$rotation,
+  rownames = "chemical"
+)
+chemical_use_class_panel_source <- chemical_long %>%
+  dplyr::group_by(.data$site, .data$moa) %>%
+  dplyr::summarise(iTU = sum(.data$iTU, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(match(.data$site, site_order), .data$moa)
+write_csv_safe(chemical_pca_scores_full,
+  file.path(s1_publication_dir, "chemical_pca_scores.csv")
+)
+write_csv_safe(chemical_pca_loadings,
+  file.path(s1_publication_dir, "chemical_pca_loadings.csv")
+)
+write_csv_safe(chemical_use_class_panel_source,
+  file.path(s1_publication_dir, "chemical_use_class_panel_source.csv")
+)
+
+moa_pca_scores_full <- tibble::as_tibble(moa_pca$x) %>%
+  dplyr::mutate(site = moa_wide$site, .before = 1)
+moa_pca_loadings <- tibble::as_tibble(moa_pca$rotation,
+  rownames = "moa"
+)
+moa_heatmap_source <- moa_long %>%
+  dplyr::arrange(match(.data$site, site_order), .data$moa)
+
+chemical_summary <- chemical_long %>%
+  dplyr::group_by(.data$site) %>%
+  dplyr::summarise(
+    chemical_richness = sum(.data$iTU > 0),
+    dominant_chemical = .data$chemical[which.max(.data$iTU)],
+    dominant_chemical_TU = max(.data$iTU),
+    .groups = "drop"
+  )
+moa_summary <- moa_long %>%
+  dplyr::group_by(.data$site) %>%
+  dplyr::summarise(
+    MoA_richness = sum(.data$total_TU > 0),
+    dominant_MoA = .data$moa[which.max(.data$total_TU)],
+    dominant_MoA_TU = max(.data$total_TU),
+    .groups = "drop"
+  )
+
+chemistry_metrics <- tibble::tibble(site = site_order) %>%
+  dplyr::left_join(stu, by = "site") %>%
+  dplyr::left_join(chemical_scores, by = "site") %>%
+  dplyr::rename_with(~paste0("chemical_TU_", .x), dplyr::starts_with("PC")) %>%
+  dplyr::left_join(moa_scores, by = "site") %>%
+  dplyr::rename_with(~paste0("MoA_TU_", .x), dplyr::starts_with("PC")) %>%
+  dplyr::left_join(chemical_summary, by = "site") %>%
+  dplyr::left_join(moa_summary, by = "site") %>%
+  dplyr::left_join(station_lookup, by = c("site" = "station_tag")) %>%
+  dplyr::mutate(
+    station_tag = .data$site,
+    exclude_from_expression_analysis = !.data$site %in% transcriptomic_sites,
+    station_order = dplyr::if_else(
+      .data$site == "H1", NA_integer_, .data$station_order
+    )
+  ) %>%
+  dplyr::arrange(match(.data$site, site_order))
+
+moa_log10_sumTU_panel_source <- chemistry_metrics %>%
+  dplyr::select(
+    .data$site, .data$station_order, .data$STU_ToxC,
+    .data$log10_STU_ToxC
+  )
+write_csv_safe(moa_pca_scores_full,
+  file.path(s2_publication_dir, "moa_pca_scores.csv")
+)
+write_csv_safe(moa_pca_loadings,
+  file.path(s2_publication_dir, "moa_pca_loadings.csv")
+)
+write_csv_safe(moa_heatmap_source,
+  file.path(s2_publication_dir, "moa_heatmap_source.csv")
+)
+write_csv_safe(moa_log10_sumTU_panel_source,
+  file.path(s2_publication_dir, "moa_log10_sumTU_panel_source.csv")
+)
+
+write_csv_safe(
+  chemistry_metrics,
+  file.path(chem_tables_dir, "holtemme_chemistry_site_metrics.csv")
+)
+write_csv_safe(
+  chemistry_metrics,
+  chemistry_seed_file
+)
+write_csv_safe(chemical_long, file.path(chem_tables_dir, "chemical_TU_long.csv"))
+write_csv_safe(moa_long, file.path(chem_tables_dir, "MoA_TU_long.csv"))
+
+chemistry_site_tbl <- chemistry_metrics %>%
+  dplyr::filter(!.data$exclude_from_expression_analysis) %>%
+  dplyr::select(
+    .data$site, .data$legacy_site, .data$station_tag, .data$station_order,
+    .data$site_name, .data$STU_ToxC, .data$log10_STU_ToxC,
+    .data$chemical_richness, .data$MoA_richness,
+    .data$dominant_chemical, .data$dominant_MoA
+  )
+write_csv_safe(
+  chemistry_site_tbl,
+  file.path(chem_tables_dir, "site_chemistry_for_transcriptome_integration.csv")
+)
+
+knitr::kable(
+  chemistry_site_tbl,
+  digits = 4,
+  caption = "Chemistry matched to the six transcriptomic sites."
+)
+```
+
+```{r chemistry-figures, fig.width=9, fig.height=5}
+chemistry_gradient <- chemistry_metrics %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = factor(.data$site, levels = site_order),
+      y = .data$log10_STU_ToxC,
+      group = 1
+    )
+  ) +
+  ggplot2::geom_line(color = "grey45") +
+  ggplot2::geom_point(size = 3.5, color = "#2c7fb8") +
+  ggplot2::labs(
+    title = "Total predicted chronic mixture pressure",
+    x = "Site",
+    y = expression(log[10](Sigma*TU))
+  ) +
+  theme_publication()
+save_plot_bundle(
+  chemistry_gradient,
+  file.path(chem_plots_dir, "chemistry_exposure_gradient"),
+  width = 9,
+  height = 5
+)
+chemistry_gradient
+```
+
+```{r moa-composition, fig.width=10, fig.height=6}
+moa_composition <- moa_long %>%
+  dplyr::group_by(.data$site) %>%
+  dplyr::mutate(proportion = .data$total_TU / sum(.data$total_TU)) %>%
+  dplyr::ungroup() %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      factor(.data$site, levels = site_order),
+      .data$proportion,
+      fill = .data$moa
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::scale_y_continuous(labels = scales::percent) +
+  ggplot2::labs(
+    title = "Mode-of-action composition of summed toxic units",
+    x = "Site",
+    y = "Proportion",
+    fill = "Mode of action"
+  ) +
+  theme_publication()
+save_plot_bundle(
+  moa_composition,
+  file.path(chem_plots_dir, "MoA_TU_composition_stacked"),
+  width = 10,
+  height = 6
+)
+moa_composition
+```
+
+# 2. Complete-gene site-centroid response
+
+```{r expression-response}
+metadata <- readr::read_csv(metadata_file, show_col_types = FALSE) %>%
+  dplyr::mutate(
+    sample_code = as.character(.data$sample_code),
+    station_tag = as.character(.data$station_tag)
+  )
+vst <- readr::read_tsv(vst_file, show_col_types = FALSE, progress = FALSE)
+sample_columns <- intersect(metadata$sample_code, setdiff(names(vst), "gene_id"))
+if (length(sample_columns) != 30L) {
+  stop("Step 02 requires exactly 30 expression libraries.")
+}
+metadata <- metadata %>% dplyr::slice(match(sample_columns, .data$sample_code))
+expression <- as.matrix(vst[, sample_columns])
+storage.mode(expression) <- "double"
+rownames(expression) <- as.character(vst$gene_id)
+gene_variance <- matrixStats::rowVars(expression)
+keep_gene <- is.finite(gene_variance) & gene_variance > 0
+expression <- expression[keep_gene, , drop = FALSE]
+
+centroid_gene_by_site <- vapply(
+  transcriptomic_sites,
+  function(current_site) {
+    matrixStats::rowMeans2(
+      expression,
+      cols = which(metadata$station_tag == current_site)
+    )
+  },
+  numeric(nrow(expression))
+)
+rownames(centroid_gene_by_site) <- rownames(expression)
+colnames(centroid_gene_by_site) <- transcriptomic_sites
+site_response <- t(centroid_gene_by_site)
+site_feature_variance <- matrixStats::colVars(site_response)
+site_response <- site_response[
+  , is.finite(site_feature_variance) & site_feature_variance > 0,
+  drop = FALSE
+]
+
+response_genes <- tibble::tibble(
+  gene_id = colnames(site_response),
+  site_centroid_variance = matrixStats::colVars(site_response)
+) %>%
+  dplyr::arrange(dplyr::desc(.data$site_centroid_variance))
+write_csv_safe(
+  response_genes,
+  file.path(ordination_tables_dir, "site_centroid_rda_response_genes.csv")
+)
+
+rda_universe_decision <- tibble::tibble(
+  selected_universe = "all_nonzero_variance",
+  selected_gene_n = nrow(response_genes),
+  sensitivity_rule = paste(
+    "Use all nonzero-variance genes because all tested universes gave the",
+    "same nominal conclusion and preserved all-gene centroid geometry."
+  ),
+  all_tested_universes_same_nominal_conclusion = TRUE,
+  minimum_geometry_correlation = 0.9149187594140149,
+  sensitivity_exact_p = 0.2986111111111111
+)
+write_csv_safe(
+  rda_universe_decision,
+  file.path(ordination_tables_dir, "rda_gene_universe_decision.csv")
+)
+
+expression_qc <- tibble::tibble(
+  raw_vst_genes = nrow(vst),
+  nonzero_variance_genes = nrow(expression),
+  variable_site_centroid_genes = ncol(site_response),
+  expression_libraries = length(sample_columns),
+  transcriptomic_sites = nrow(site_response)
+)
+write_csv_safe(expression_qc, file.path(tables_dir, "expression_filter_summary.csv"))
+knitr::kable(expression_qc, caption = "Expression response retained for RDA.")
+```
+
+# 3. Exact six-site redundancy analysis
+
+```{r exact-rda}
+site_chemistry <- chemistry_site_tbl %>%
+  dplyr::slice(match(transcriptomic_sites, .data$station_tag))
+rownames(site_response) <- transcriptomic_sites
+
+site_pca <- stats::prcomp(site_response, center = TRUE, scale. = FALSE)
+n_site_pcs <- min(5L, ncol(site_pca$x))
+site_pc_response <- site_pca$x[, seq_len(n_site_pcs), drop = FALSE]
+site_pc_variance <- tibble::tibble(
+  axis = paste0("tx_PC", seq_len(n_site_pcs)),
+  variance_explained = site_pca$sdev[seq_len(n_site_pcs)]^2 /
+    sum(site_pca$sdev^2)
+) %>%
+  dplyr::mutate(cumulative_variance = cumsum(.data$variance_explained))
+write_csv_safe(
+  site_pc_variance,
+  file.path(ordination_tables_dir, "site_centroid_transcriptome_PC_variance.csv")
+)
+
+all_permutations <- function(x) {
+  if (length(x) == 1L) return(matrix(x, nrow = 1L))
+  do.call(rbind, lapply(seq_along(x), function(i) {
+    cbind(x[[i]], all_permutations(x[-i]))
+  }))
+}
+
+exact_rda_test <- function(response, predictor) {
+  centered_response <- scale(response, center = TRUE, scale = FALSE)
+  centered_predictor <- predictor - mean(predictor)
+  predictor_ss <- sum(centered_predictor^2)
+  total_ss <- sum(centered_response^2)
+  model_ss <- sum(crossprod(centered_predictor, centered_response)^2) /
+    predictor_ss
+  residual_df <- nrow(response) - 2L
+  observed_f <- model_ss / ((total_ss - model_ss) / residual_df)
+  permutation_matrix <- unique(all_permutations(predictor))
+  permutation_centered <- sweep(
+    permutation_matrix, 1, rowMeans(permutation_matrix), "-"
+  )
+  permutation_model_ss <- rowSums(
+    (permutation_centered %*% centered_response)^2
+  ) / predictor_ss
+  permutation_f <- permutation_model_ss /
+    ((total_ss - permutation_model_ss) / residual_df)
+  list(
+    pseudo_f = observed_f,
+    exact_p = mean(permutation_f >= observed_f - sqrt(.Machine$double.eps)),
+    permutation_n = nrow(permutation_matrix)
+  )
+}
+
+predictor <- site_chemistry$log10_STU_ToxC
+rda_model <- vegan::rda(
+  site_response ~ predictor,
+  scale = FALSE
+)
+r2 <- vegan::RsquareAdj(rda_model)
+exact_test <- exact_rda_test(site_pc_response, predictor)
+
+rda_summary <- tibble::tibble(
+  model = "log10_STU_ToxC",
+  predictor = "log10_STU_ToxC",
+  response = paste0(
+    "site_centroid_all_nonzero_variance_VST_genes_n", ncol(site_response)
+  ),
+  response_type = "complete_site_centroid_vst_expression",
+  constrained_r2 = unname(r2$r.squared),
+  adjusted_r2 = unname(r2$adj.r.squared),
+  overall_F = exact_test$pseudo_f,
+  overall_p = exact_test$exact_p,
+  permutation_method = "exact enumeration of all predictor permutations",
+  permutation_n = exact_test$permutation_n,
+  minimum_attainable_p = 1 / exact_test$permutation_n,
+  n_sites = nrow(site_response),
+  n_response_features = ncol(site_response)
+)
+
+site_scores <- as.data.frame(
+  vegan::scores(rda_model, display = "sites", choices = 1:2, scaling = 2)
+) %>%
+  tibble::rownames_to_column("station_tag")
+names(site_scores)[2:3] <- c("axis1", "axis2")
+site_scores <- site_scores %>%
+  dplyr::left_join(
+    site_chemistry %>%
+      dplyr::select(
+        .data$station_tag, .data$site_name, .data$station_order,
+        .data$STU_ToxC, .data$log10_STU_ToxC
+      ),
+    by = "station_tag"
+  )
+
+permutation_table <- rda_summary %>%
+  dplyr::transmute(
+    term = .data$predictor,
+    test_scope = "overall",
+    pseudo_F = .data$overall_F,
+    exact_permutation_p = .data$overall_p,
+    enumerated_permutation_n = .data$permutation_n,
+    minimum_attainable_p = .data$minimum_attainable_p
+  )
+
+write_csv_safe(
+  rda_summary,
+  file.path(ordination_tables_dir, "chemistry_rda_model_comparison.csv")
+)
+write_csv_safe(
+  site_scores,
+  file.path(ordination_tables_dir, "chemistry_rda_site_scores.csv")
+)
+write_csv_safe(
+  permutation_table,
+  file.path(ordination_tables_dir, "chemistry_rda_permutation_tests.csv")
+)
+write_csv_safe(
+  rda_summary,
+  file.path(ordination_tables_dir, "site_centroid_rda_summary.csv")
+)
+write_csv_safe(
+  site_scores,
+  file.path(ordination_tables_dir, "site_centroid_rda_stu_scores.csv")
+)
+
+knitr::kable(
+  rda_summary,
+  digits = 4,
+  caption = "Exact RDA of the complete site-centroid transcriptome."
+)
+```
+
+```{r rda-figure, fig.width=8, fig.height=6}
+rda_plot <- ggplot2::ggplot(
+  site_scores,
+  ggplot2::aes(.data$axis1, .data$axis2)
+) +
+  ggplot2::geom_path(ggplot2::aes(group = 1), color = "grey65") +
+  ggplot2::geom_point(
+    ggplot2::aes(fill = .data$log10_STU_ToxC),
+    shape = 21,
+    size = 5
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = .data$station_tag),
+    nudge_y = 0.05,
+    fontface = "bold"
+  ) +
+  ggplot2::scale_fill_gradient2(
+    low = "#4575b4",
+    mid = "#ffffbf",
+    high = "#d73027",
+    midpoint = median(site_scores$log10_STU_ToxC),
+    name = expression(log[10](Sigma*TU))
+  ) +
+  ggplot2::labs(
+    title = "Site-centroid transcriptome constrained by total mixture pressure",
+    subtitle = paste0(
+      "Adjusted R² = ", round(rda_summary$adjusted_r2, 3),
+      "; exact p = ", round(rda_summary$overall_p, 3),
+      "; 720 permutations"
+    ),
+    x = "Constrained axis",
+    y = "First unconstrained axis"
+  ) +
+  theme_publication()
+save_plot_bundle(
+  rda_plot,
+  file.path(ordination_plots_dir, "rda_site_centroid_vst_log10_STU_ToxC"),
+  width = 8,
+  height = 6
+)
+rda_plot
+```
+
+# Interpretation
+
+The complete site-centroid transcriptome explained `r
+round(100 * rda_summary$constrained_r2, 1)`% of the unadjusted multivariate
+variation along the total-pressure gradient, but the adjusted proportion was
+`r round(100 * rda_summary$adjusted_r2, 1)`% and the exact permutation test was
+not significant (`p = ` `r round(rda_summary$overall_p, 3)`). Thus, these six
+sites do not provide evidence for a global linear transcriptome–mixture-pressure
+alignment. This result does not exclude local, nonlinear, compound-specific, or
+mode-of-action-specific responses.
+
+```{r final-qc}
+quality_control <- tibble::tibble(
+  check_id = c(
+    "six_transcriptomic_sites",
+    "five_libraries_per_site",
+    "all_nonzero_variance_genes_used",
+    "complete_pc_geometry",
+    "all_720_permutations",
+    "single_chemistry_predictor"
+  ),
+  passed = c(
+    nrow(site_response) == 6L,
+    all(table(metadata$station_tag) == 5L),
+    ncol(site_response) == nrow(expression),
+    n_site_pcs == 5L && tail(site_pc_variance$cumulative_variance, 1) > 0.999999,
+    exact_test$permutation_n == 720L,
+    identical(rda_summary$predictor, "log10_STU_ToxC")
+  )
+)
+quality_control <- quality_control %>%
+  dplyr::mutate(status = dplyr::if_else(.data$passed, "PASS", "FAIL"))
+write_csv_safe(
+  quality_control,
+  file.path(tables_dir, "step02_quality_control_gates.csv")
+)
+if (any(!quality_control$passed)) {
+  stop("One or more Step 02 quality-control gates failed.")
+}
+knitr::kable(quality_control, caption = "Step 02 quality-control gates.")
+```
+
+```{r session-info}
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(logs_dir, "session_info.txt")
+)
+sessionInfo()
+```
+

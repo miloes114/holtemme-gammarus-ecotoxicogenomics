@@ -1,0 +1,1292 @@
+---
+title: "Holtemme global transcriptome structure"
+author: "Camilo Escobar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+fontsize: 11pt
+geometry: margin=1in
+---
+
+Overview
+
+This document reproduces the global transcriptome structure analyses for the
+Holtemme *Gammarus pulex* study. The goal of this section is to characterize how
+transcriptomic profiles are organized across the German river gradient before
+integrating chemical exposure data or performing differential expression
+analysis. In the publication workflow, stations are displayed using the
+manuscript shorthand `H2-H7`, corresponding to the legacy site IDs
+`HOL01-HOL06`.
+
+The analyses in this report are deliberately unsupervised and descriptive. They are intended
+to address the following questions:
+
+1. Does site identity structure global expression patterns?
+2. Are any samples clear transcriptomic outliers?
+3. Do downstream sites diverge progressively from the reference condition?
+4. Are there sharper local discontinuities along the river gradient?
+
+This report is standalone and reproducible. It writes all outputs to a
+results-specific project directory without overwriting other analyses.
+
+Biological rationale
+
+Field transcriptomics in wild sentinel organisms is inherently noisy because samples integrate multi-
+ple sources of biological and environmental variation. Before moving to mechanistic interpretation,
+it is essential to establish whether the data contain a coherent large-scale expression structure across
+the river gradient.
+
+In this section, we therefore focus on exploratory multivariate analyses of the variance-stabilized
+expression matrix. These methods do not identify causal drivers by themselves, but they provide
+an essential first biological overview of whether wild Gammarus pulex exhibits structured molecular
+differentiation across the Holtemme gradient.
+
+Importantly, this report does not yet attempt to explain the observed structure using chem-
+istry, physico-chemical variables, or differential expression contrasts. Those steps belong to later
+manuscript sections.
+
+# Analytical scope
+
+This script:
+
+- uses only the German / Holtemme samples
+- uses the raw gene count matrix as input
+- applies a simple low-count filter for stable ordination
+- uses blind variance-stabilizing transformation (VST) for unsupervised exploration
+- summarizes transcriptome structure using:
+  - PCA
+  - scree plots
+  - sample-to-sample distance heatmaps
+  - hierarchical clustering
+  - top-variable-gene heatmaps
+  - PERMANOVA and dispersion tests
+  - outlier diagnostics
+  - site-centroid distance summaries
+
+This script does not:
+
+- integrate chemistry
+- use environmental variables as predictors
+- run DESeq2 differential expression testing
+- make mechanistic claims about pathway activation
+
+# Input and output structure
+
+This report assumes it is run from the project home directory and uses the following inputs:
+
+- raw count matrix: `02_inputs/counts_raw_gene_level.tabular`
+- metadata file: `01_metadata/FORMAS_Metadata.xlsx`
+
+All outputs are written to a results-specific external folder:
+
+- `Results_01_Global_Transcriptome_Structure/`
+  - `plots/`
+  - `tables/`
+  - `matrices/`
+  - `logs/`
+
+# 0. Setup and configuration
+
+This first step loads the required packages, defines paths, and sets analysis parameters. Keeping
+all settings together at the beginning makes the workflow easier to audit, update, and rerun.
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(stringsAsFactors = FALSE)
+
+required_pkgs <- c(
+  "DESeq2",
+  "SummarizedExperiment",
+  "ggplot2",
+  "ggrepel",
+  "pheatmap",
+  "readxl",
+  "tibble",
+  "readr",
+  "dplyr",
+  "tidyr",
+  "vegan",
+  "RColorBrewer"
+)
+
+missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Missing required packages: ",
+    paste(missing_pkgs, collapse = ", "),
+    "\nPlease install them before running this report."
+  )
+}
+
+for (p in required_pkgs) {
+  suppressPackageStartupMessages(library(p, character.only = TRUE))
+}
+
+project_dir <- getwd()
+source(file.path(project_dir, "support", "workflow_helpers.R"))
+sync_rstudio_pandoc()
+label_bundle <- get_publication_labels(project_dir)
+
+count_file <- file.path(
+  project_dir,
+  "02_inputs",
+  "counts_raw_gene_level.tabular"
+)
+
+metadata_file <- file.path(project_dir, "01_metadata", "FORMAS_Metadata.xlsx")
+
+results_dir <- make_results_dir(project_dir, 1, "Global_Transcriptome_Structure")
+plots_dir <- file.path(results_dir, "plots")
+tables_dir <- file.path(results_dir, "tables")
+matrices_dir <- file.path(results_dir, "matrices")
+logs_dir <- file.path(results_dir, "logs")
+
+for (d in c(results_dir, plots_dir, tables_dir, matrices_dir, logs_dir)) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+
+# Analysis parameters
+country_keep <- "Germany"
+site_levels <- label_bundle$site_levels_simple
+reference_site <- "H2"
+min_count <- 10
+min_samples <- 3
+ntop_heatmap <- 500
+pca_n_axes_for_centroid_dist <- 5
+plot_dpi <- 300
+plot_width <- 8
+plot_height <- 6
+label_points <- TRUE
+
+# Shared border settings for publication panels
+panel_border_col <- "black"
+panel_border_lwd <- 0.25
+```
+
+# 1. Helper functions
+
+This section defines small utility functions for cleaner downstream code. The intention is not to
+hide analysis logic, but to keep repetitive tasks standardized and readable.
+
+```{r}
+standardize_ids <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x <- gsub("\\s+", "_", x)
+  x <- gsub("-", "_", x)
+  x <- gsub("[^A-Za-z0-9_]+", "", x)
+  x
+}
+
+save_plot_dual <- function(plot_obj, filename_stub, width = 8, height = 6, dpi = 300) {
+  ggplot2::ggsave(
+    filename = file.path(plots_dir, paste0(filename_stub, ".png")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+  ggplot2::ggsave(
+    filename = file.path(plots_dir, paste0(filename_stub, ".pdf")),
+    plot = plot_obj,
+    width = width,
+    height = height,
+    dpi = dpi
+  )
+}
+
+write_table_safe <- function(df, filename) {
+  readr::write_csv(df, file.path(tables_dir, filename))
+}
+```
+
+# 2. Load raw count matrix
+
+We begin with the raw gene count matrix because unsupervised transcriptome structure should
+be assessed from count-derived expression values rather than from downstream contrast-specific
+subsets.
+
+At this stage, we only perform minimal preprocessing:
+
+* set the first column as gene IDs
+* standardize sample and gene identifiers
+* remove genes with zero counts across all retained samples
+
+```{r}
+counts_df <- utils::read.delim(count_file, check.names = FALSE)
+colnames(counts_df)[1] <- "gene_id"
+counts_df$gene_id <- standardize_ids(counts_df$gene_id)
+counts_df <- counts_df[!duplicated(counts_df$gene_id), , drop = FALSE]
+rownames(counts_df) <- counts_df$gene_id
+counts_df$gene_id <- NULL
+
+counts_mat <- as.matrix(counts_df)
+storage.mode(counts_mat) <- "integer"
+colnames(counts_mat) <- standardize_ids(colnames(counts_mat))
+counts_mat <- counts_mat[rowSums(counts_mat) > 0, , drop = FALSE]
+
+cat("Raw count matrix dimensions:\n")
+cat(" Genes:", nrow(counts_mat), "\n")
+cat(" Samples:", ncol(counts_mat), "\n")
+```
+
+# 3. Load metadata and subset to Germany / Holtemme samples
+
+The metadata provide the biological structure needed for grouping and interpretation. For this
+manuscript section, only the German Holtemme samples are relevant. Restricting the analysis
+at this stage is important because mixing geographically distinct populations would risk conflating
+river-gradient structure with broader population or country effects.
+
+From the metadata, we use:
+
+* `sample_code` as the unique sample identifier
+* `site_id` as the main grouping factor for transcriptome structure
+* `sampling_sites` as a human-readable site descriptor
+* `site_type` as an auxiliary descriptor
+* `country` for subsetting
+
+Other environmental fields are retained for traceability, but they are not used as explanatory
+variables in this report.
+
+```{r}
+meta_raw <- readxl::read_excel(metadata_file)
+meta_raw <- as.data.frame(meta_raw)
+station_crosswalk <- label_bundle$station_tbl
+
+required_cols <- c("sample_code", "sampling_sites", "site_id", "country", "site_type")
+missing_cols <- setdiff(required_cols, colnames(meta_raw))
+if (length(missing_cols) > 0) {
+  stop("Metadata is missing required columns: ", paste(missing_cols, collapse = ", "))
+}
+
+meta_raw$sample_code <- standardize_ids(meta_raw$sample_code)
+meta_raw$site_id <- standardize_ids(meta_raw$site_id)
+meta_raw$sampling_sites <- as.character(meta_raw$sampling_sites)
+meta_raw$site_type <- as.character(meta_raw$site_type)
+meta_raw$country <- as.character(meta_raw$country)
+
+meta_de <- meta_raw %>%
+  dplyr::filter(country == country_keep) %>%
+  dplyr::left_join(
+    station_crosswalk %>%
+      dplyr::select(.data$legacy_site_id, .data$station_tag, .data$display_label, .data$site_name),
+    by = c("site_id" = "legacy_site_id")
+  ) %>%
+  dplyr::distinct(sample_code, .keep_all = TRUE)
+
+cat("Metadata rows retained for Germany:", nrow(meta_de), "\n")
+```
+
+# 4. Match metadata and count matrix
+
+Accurate sample matching is one of the most critical quality-control steps in RNA-seq analysis.
+Before any ordination is performed, the expression matrix and metadata must be synchronized so
+that every sample column corresponds exactly to the correct metadata row.
+
+```{r}
+common_samples <- intersect(colnames(counts_mat), meta_de$sample_code)
+
+if (length(common_samples) == 0) {
+  stop("No overlapping German sample IDs were found between the count matrix and metadata.")
+}
+
+counts_mat <- counts_mat[, common_samples, drop = FALSE]
+meta <- meta_de[match(common_samples, meta_de$sample_code), , drop = FALSE]
+rownames(meta) <- meta$sample_code
+
+site_levels_present <- site_levels[site_levels %in% unique(meta$station_tag)]
+
+meta$sample <- meta$sample_code
+meta$site <- factor(meta$station_tag, levels = site_levels_present)
+meta$short_name <- meta$sample_code
+
+stopifnot(identical(colnames(counts_mat), meta$sample))
+
+cat("Matched German dataset:\n")
+cat(" Samples in expression matrix:", ncol(counts_mat), "\n")
+cat(" Sites represented:", length(unique(meta$site)), "\n")
+
+write_table_safe(meta, "metadata_matched_germany.csv")
+```
+
+# 5. Initial sample-level QC summary
+
+Before transforming the data, it is useful to inspect broad sample-level properties such as library size
+and the number of detected genes. These summaries do not define transcriptome structure directly,
+but they help identify whether apparent outliers may simply reflect unusually small libraries or poor
+transcript detection.
+
+```{r}
+sample_qc <- data.frame(
+  sample = colnames(counts_mat),
+  site = meta$site,
+  sampling_sites = meta$sampling_sites,
+  site_type = meta$site_type,
+  library_size = colSums(counts_mat),
+  detected_genes = colSums(counts_mat > 0),
+  stringsAsFactors = FALSE
+)
+
+write_table_safe(sample_qc, "sample_qc_basic.csv")
+
+knitr::kable(
+  head(sample_qc, 10),
+  caption = "Basic sample-level QC metrics.",
+  row.names = FALSE
+)
+
+p_libsize <- ggplot2::ggplot(sample_qc, ggplot2::aes(x = site, y = library_size, fill = site)) +
+  ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  ggplot2::geom_jitter(width = 0.15, size = 2, alpha = 0.9) +
+  ggplot2::labs(title = "Library size by site", x = "Site", y = "Raw library size") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position = "none")
+
+p_libsize
+save_plot_dual(p_libsize, "01_library_size_by_site", width = 8, height = 5, dpi = plot_dpi)
+
+p_detected <- ggplot2::ggplot(sample_qc, ggplot2::aes(x = site, y = detected_genes, fill = site)) +
+  ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  ggplot2::geom_jitter(width = 0.15, size = 2, alpha = 0.9) +
+  ggplot2::labs(title = "Detected genes by site", x = "Site", y = "Genes with non-zero counts") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position = "none")
+
+p_detected
+save_plot_dual(p_detected, "02_detected_genes_by_site", width = 8, height = 5, dpi = plot_dpi)
+```
+
+The German subset comprised 30 samples distributed across six Holtemme sites, with broadly
+comparable library sizes and numbers of detected genes across the gradient. Although some vari-
+ation among individual samples was evident, there was no strong site-wide imbalance suggesting
+systematic technical bias in sequencing depth. One H6 sample showed somewhat reduced gene
+detection relative to the rest, but overall the sample-level QC metrics indicate that the dataset is
+technically consistent enough for downstream unsupervised ordination and clustering analyses.
+
+# 6. Low-count filtering
+
+A mild low-count filter is applied before ordination to reduce instability caused by genes with
+extremely sparse expression. This does not aim to define a final expression universe for later
+differential expression analysis; it simply improves robustness for global structure analyses.
+
+Here, genes are retained if they have at least 10 counts in at least 3 samples.
+
+```{r}
+keep_genes <- rowSums(counts_mat >= min_count) >= min_samples
+counts_filt <- counts_mat[keep_genes, , drop = FALSE]
+
+filter_summary <- data.frame(
+  metric = c("genes_raw", "genes_after_filter", "genes_removed", "samples_retained"),
+  value = c(
+    nrow(counts_mat),
+    nrow(counts_filt),
+    nrow(counts_mat) - nrow(counts_filt),
+    ncol(counts_filt)
+  )
+)
+
+write_table_safe(filter_summary, "filtering_summary.csv")
+
+knitr::kable(
+  filter_summary,
+  caption = "Summary of low-count filtering.",
+  row.names = FALSE
+)
+```
+
+Low-count filtering reduced the dataset from 443,656 to 151,508 genes while retaining all 30 samples.
+This represents a substantial but expected reduction for a de novo transcriptome, where many
+features are weakly expressed or only sporadically detected. The filtered matrix therefore preserves
+broad transcriptome-wide information while removing a large number of low-information features
+that could otherwise add noise to multivariate analyses.
+
+# 7. Variance-stabilizing transformation (blind)
+
+For PCA and distance-based analyses, raw counts are not ideal because variance strongly depends
+on the mean. We therefore apply a blind VST using DESeq2. The transformation stabilizes the
+variance across the dynamic range while deliberately avoiding group-informed modelling, which is
+appropriate here because this section is exploratory rather than contrast-driven.
+
+```{r}
+dds <- DESeq2::DESeqDataSetFromMatrix(
+  countData = counts_filt,
+  colData = meta,
+  design = ~ site
+)
+
+dds <- DESeq2::estimateSizeFactors(dds)
+vsd <- DESeq2::vst(dds, blind = TRUE)
+vst_mat <- SummarizedExperiment::assay(vsd)
+
+readr::write_tsv(
+  tibble::rownames_to_column(as.data.frame(vst_mat), "gene_id"),
+  file.path(matrices_dir, "vst_matrix_germany.tsv")
+)
+```
+
+A blind variance-stabilizing transformation was then applied to the filtered count matrix to make
+sample-to-sample comparisons more robust across the full dynamic range of expression values.
+Because this section is intended to describe global structure rather than fit contrasts, the use of a
+blind transformation is appropriate and ensures that the ordination reflects broad transcriptomic
+relationships among samples rather than model-informed group separation.
+
+# 8. Principal component analysis (PCA)
+
+PCA provides the first compact view of transcriptome-wide structure across samples. In this
+context, it helps assess whether site identity aligns with the major axes of variation and whether
+downstream samples appear to diverge gradually, abruptly, or not at all.
+
+```{r}
+# Shared Figure 2 styling constants
+panel_border_col <- "black"
+panel_border_lwd <- 0.45
+panel_grid_col <- "grey88"
+panel_grid_lwd <- 0.35
+
+pca <- stats::prcomp(t(vst_mat), center = TRUE, scale. = FALSE)
+percent_var <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pca_scores <- as.data.frame(pca$x)
+pca_scores$sample <- rownames(pca_scores)
+
+pca_scores <- dplyr::left_join(
+  pca_scores,
+  meta,
+  by = "sample"
+)
+
+site_palette <- c(
+  H2 = "#E69F00",
+  H3 = "#56B4E9",
+  H4 = "#009E73",
+  H5 = "#0072B2",
+  H6 = "#CC79A7",
+  H7 = "#D55E00"
+)
+
+site_levels_use <- names(site_palette)[
+  names(site_palette) %in% unique(as.character(pca_scores$site))
+]
+
+site_palette_use <- site_palette[site_levels_use]
+
+pca_scores <- pca_scores %>%
+  dplyr::mutate(
+    site = factor(as.character(site), levels = site_levels_use)
+  )
+
+pca_var_table <- data.frame(
+  PC = paste0("PC", seq_along(percent_var)),
+  eigenvalue = pca$sdev^2,
+  proportion_variance = percent_var,
+  cumulative_variance = cumsum(percent_var)
+)
+
+write_table_safe(pca_scores, "pca_sample_scores.csv")
+write_table_safe(pca_var_table, "pca_variance_explained.csv")
+
+knitr::kable(
+  head(pca_var_table, 10),
+  digits = 3,
+  caption = "Variance explained by the first principal components.",
+  row.names = FALSE
+)
+
+pca_centroids_plot <- pca_scores %>%
+  dplyr::group_by(site) %>%
+  dplyr::summarise(
+    PC1 = mean(PC1, na.rm = TRUE),
+    PC2 = mean(PC2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    site = factor(as.character(site), levels = site_levels_use)
+  )
+
+pca_segment_df <- pca_scores %>%
+  dplyr::select(sample, site, PC1, PC2) %>%
+  dplyr::left_join(
+    pca_centroids_plot %>%
+      dplyr::rename(
+        PC1_centroid = PC1,
+        PC2_centroid = PC2
+      ),
+    by = "site"
+  )
+
+p_pca12 <- ggplot2::ggplot() +
+  ggplot2::geom_segment(
+    data = pca_segment_df,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      xend = PC1_centroid,
+      yend = PC2_centroid
+    ),
+    inherit.aes = FALSE,
+    linewidth = 0.35,
+    colour = "grey75",
+    alpha = 0.7
+  ) +
+  ggplot2::geom_point(
+    data = pca_scores,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      colour = site
+    ),
+    size = 2.8,
+    alpha = 0.9
+  ) +
+  ggplot2::geom_point(
+    data = pca_centroids_plot,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      fill = site
+    ),
+    shape = 21,
+    size = 5.2,
+    stroke = 0.8,
+    colour = "black"
+  ) +
+  ggrepel::geom_text_repel(
+    data = pca_centroids_plot,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      label = site
+    ),
+    inherit.aes = FALSE,
+    size = 3.8,
+    fontface = "bold",
+    box.padding = 0.4,
+    point.padding = 0.35,
+    seed = 123,
+    min.segment.length = 0,
+    segment.size = 0.35
+  ) +
+  ggplot2::scale_colour_manual(
+    values = site_palette_use,
+    drop = FALSE
+  ) +
+  ggplot2::scale_fill_manual(
+    values = site_palette_use,
+    drop = FALSE
+  ) +
+  ggplot2::labs(
+    title = "",
+    x = paste0("PC1 (", round(percent_var[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(percent_var[2] * 100, 1), "%)")
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "none",
+
+    panel.background = ggplot2::element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = ggplot2::element_rect(
+      fill = "white",
+      colour = NA
+    ),
+
+    panel.grid.major = ggplot2::element_line(
+      colour = panel_grid_col,
+      linewidth = panel_grid_lwd
+    ),
+    panel.grid.minor = ggplot2::element_blank(),
+
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+
+    axis.title = ggplot2::element_text(
+      face = "bold",
+      colour = "black"
+    ),
+    axis.text = ggplot2::element_text(
+      colour = "grey25"
+    ),
+
+    plot.margin = ggplot2::margin(6, 6, 6, 6)
+  )
+
+p_pca12
+
+save_plot_dual(
+  p_pca12,
+  "04_pca_pc1_pc2_publication",
+  width = 6.2,
+  height = 5.4,
+  dpi = 600
+)
+```
+
+The PCA revealed reproducible but incomplete site-level organization across the Holtemme gradient.
+Individuals from the same site tended to occupy related regions of ordination space, yet overlap
+among sites remained substantial on both the PC1–PC2 and PC1–PC3 planes. This indicates that
+site identity contributes to global transcriptome structure, but that the signal is moderate rather
+than discrete. Because PC1, PC2, and PC3 explained 9.2%, 7.0%, and 6.2% of the variance,
+respectively, the main pattern is multivariate and distributed across several axes rather than domi-
+nated by a single gradient.
+
+# 9. Scree plot
+
+The scree plot helps determine how concentrated the variance is in the leading components. This
+is useful when interpreting whether global structure is dominated by one or a few axes or spread
+more diffusely across the transcriptome.
+
+```{r}
+p_scree <- ggplot2::ggplot(
+  pca_var_table[seq_len(min(10, nrow(pca_var_table))), , drop = FALSE],
+  ggplot2::aes(x = seq_len(min(10, nrow(pca_var_table))), y = proportion_variance)
+) +
+  ggplot2::geom_line() +
+  ggplot2::geom_point(size = 2) +
+  ggplot2::labs(
+    title = "Scree plot",
+    x = "Principal component",
+    y = "Proportion of variance explained"
+  ) +
+  ggplot2::theme_bw()
+
+p_scree
+save_plot_dual(p_scree, "05_scree_plot", width = 6, height = 4.5, dpi = plot_dpi)
+```
+
+The scree plot reinforces this interpretation. Variance was spread across multiple principal com-
+ponents, with the first ten axes accounting for roughly half of the total variance. This pattern is
+consistent with a heterogeneous field dataset in which transcriptome-wide structure reflects several
+overlapping sources of biological variation rather than a single overwhelming driver.
+
+# 10. Sample-to-sample distances and hierarchical clustering
+
+PCA is informative but compresses the data into a small number of axes. Distance-based summaries
+complement PCA by examining the overall similarity structure across all retained genes.
+
+The sample-distance heatmap and hierarchical clustering help reveal whether samples cluster pri-
+marily by site, whether site groups are compact, and whether any samples show unusual placement
+relative to their expected group.
+
+```{r}
+sample_dist <- as.matrix(stats::dist(t(vst_mat), method = "euclidean"))
+
+readr::write_tsv(
+  tibble::rownames_to_column(as.data.frame(sample_dist), "sample"),
+  file.path(matrices_dir, "sample_distance_matrix.tsv")
+)
+
+annotation_col <- data.frame(site = meta$site)
+rownames(annotation_col) <- meta$sample
+
+pheatmap::pheatmap(
+  sample_dist,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,
+  main = "Sample-to-sample Euclidean distances (VST)"
+)
+
+png(file.path(plots_dir, "06_sample_distance_heatmap.png"), width = 8, height = 7, units = "in", res = plot_dpi)
+pheatmap::pheatmap(
+  sample_dist,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,
+  main = "Sample-to-sample Euclidean distances (VST)"
+)
+dev.off()
+
+pdf(file.path(plots_dir, "06_sample_distance_heatmap.pdf"), width = 8, height = 7)
+pheatmap::pheatmap(
+  sample_dist,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  annotation_col = annotation_col,
+  annotation_row = annotation_col,
+  main = "Sample-to-sample Euclidean distances (VST)"
+)
+dev.off()
+
+hc <- stats::hclust(stats::dist(t(vst_mat), method = "euclidean"), method = "complete")
+plot(hc, main = "Hierarchical clustering of samples (VST)", xlab = "", sub = "")
+
+pdf(file.path(plots_dir, "07_hierarchical_clustering_dendrogram.pdf"), width = 8, height = 6)
+plot(hc, main = "Hierarchical clustering of samples (VST)", xlab = "", sub = "")
+dev.off()
+
+png(file.path(plots_dir, "07_hierarchical_clustering_dendrogram.png"), width = 8, height = 6, units = "in", res = plot_dpi)
+plot(hc, main = "Hierarchical clustering of samples (VST)", xlab = "", sub = "")
+dev.off()
+```
+
+The sample-distance heatmap and hierarchical clustering broadly supported the PCA. Samples from
+the same site often showed elevated similarity, but clustering was not strictly site-exclusive. H2
+formed the most cohesive subgroup, whereas several intermediate and downstream samples grouped
+partly with neighbouring sites. Together, the heatmap and dendrogram indicate that site-related
+organization is present, but that transcriptomic boundaries among sites remain porous rather than
+sharply discrete.
+
+# 11. Heatmap of top variable genes
+
+A heatmap of the most variable genes gives a more granular view of coordinated sample structure.
+Unlike PCA, which summarizes variance in low-dimensional space, this plot helps visualize whether
+groups of samples share broader expression similarity across the genes contributing most strongly
+to transcriptomic differentiation.
+
+```{r}
+gene_var <- apply(vst_mat, 1, stats::var, na.rm = TRUE)
+top_n_use <- min(ntop_heatmap, length(gene_var))
+top_genes <- names(sort(gene_var, decreasing = TRUE))[seq_len(top_n_use)]
+
+vst_top <- vst_mat[top_genes, , drop = FALSE]
+vst_top_z <- t(scale(t(vst_top)))
+
+pheatmap::pheatmap(
+  vst_top_z,
+  show_rownames = FALSE,
+  annotation_col = annotation_col,
+  main = paste0("Top ", top_n_use, " most variable genes (z-scored VST)")
+)
+
+pheatmap::pheatmap(
+  vst_top_z,
+  show_rownames = FALSE,
+  annotation_col = annotation_col,
+  main = paste0("Top ", top_n_use, " most variable genes (z-scored VST)"),
+  filename = file.path(plots_dir, "08_top_variable_genes_heatmap.png"),
+  width = 8,
+  height = 10
+)
+
+pdf(file.path(plots_dir, "08_top_variable_genes_heatmap.pdf"), width = 8, height = 10)
+pheatmap::pheatmap(
+  vst_top_z,
+  show_rownames = FALSE,
+  annotation_col = annotation_col,
+  main = paste0("Top ", top_n_use, " most variable genes (z-scored VST)")
+)
+dev.off()
+```
+
+The heatmap of the 500 most variable genes showed coordinated expression blocks across subsets of
+samples, again supporting structured transcriptomic differentiation among sites. However, these
+modules were not uniquely site-specific and several extended across more than one station. This
+suggests that global site effects are carried by partially shared expression programs rather than by
+completely distinct site-restricted signatures.
+
+# 12. Formal test of site-level transcriptome structure
+
+Ordination plots can suggest grouping, but visual separation alone should not be overinterpreted.
+We therefore add a formal multivariate test of site structure using PERMANOVA, together with
+a dispersion test to assess whether differences among sites may partly reflect unequal within-site
+spread.
+
+These tests do not identify biological mechanisms, but they strengthen the descriptive evaluation
+of whether site identity organizes transcriptomic variance.
+
+```{r}
+adonis_res <- vegan::adonis2(stats::dist(t(vst_mat), method = "euclidean") ~ site, data = meta, permutations = 999)
+adonis_df <- as.data.frame(adonis_res)
+adonis_df <- tibble::rownames_to_column(adonis_df, "term")
+write_table_safe(adonis_df, "adonis_site_effect.csv")
+
+beta_obj <- vegan::betadisper(stats::dist(t(vst_mat), method = "euclidean"), group = meta$site)
+
+beta_anova <- as.data.frame(stats::anova(beta_obj))
+beta_anova <- tibble::rownames_to_column(beta_anova, "term")
+write_table_safe(beta_anova, "betadisper_anova.csv")
+
+beta_perm <- vegan::permutest(beta_obj, permutations = 999)
+beta_perm_df <- as.data.frame(beta_perm$tab)
+beta_perm_df <- tibble::rownames_to_column(beta_perm_df, "term")
+write_table_safe(beta_perm_df, "betadisper_permutation.csv")
+
+knitr::kable(
+  adonis_df,
+  digits = 4,
+  caption = "PERMANOVA for site effect on global transcriptome structure.",
+  row.names = FALSE
+)
+
+knitr::kable(
+  beta_anova,
+  digits = 4,
+  caption = "ANOVA for homogeneity of multivariate dispersion.",
+  row.names = FALSE
+)
+
+knitr::kable(
+  beta_perm_df,
+  digits = 4,
+  caption = "Permutation test for homogeneity of multivariate dispersion.",
+  row.names = FALSE
+)
+```
+
+Formal multivariate testing confirmed that site identity contributes significantly to transcriptome-
+wide structure. PERMANOVA detected a significant site effect, indicating that a substantial fraction
+of the variance in the Euclidean distance matrix was associated with differences among sites. In
+contrast, multivariate dispersion did not differ significantly among sites, supporting the interpreta-
+tion that the observed site effect reflects centroid separation rather than unequal within-site spread.
+
+# 13. Outlier diagnostics
+
+Because field-collected samples can show individual-level variability unrelated to clear technical
+failure, potential outliers are screened cautiously. Here, we quantify each sample’s Euclidean dis-
+tance to its own site centroid in PCA space and flag observations lying beyond the within-site
+upper whisker rule.
+
+```{r}
+pcs_use_outlier <- seq_len(min(5, ncol(pca$x)))
+pc_cols_outlier <- colnames(pca$x)[pcs_use_outlier]
+
+site_centroids_pca <- aggregate(
+  pca$x[, pcs_use_outlier, drop = FALSE],
+  by = list(site = meta$site),
+  FUN = mean
+)
+
+stopifnot(all(pc_cols_outlier %in% colnames(site_centroids_pca)))
+stopifnot(!"site" %in% pc_cols_outlier)
+
+sample_to_centroid <- data.frame(
+  sample = rownames(pca$x),
+  site = meta$site,
+  stringsAsFactors = FALSE
+)
+
+sample_to_centroid$distance_to_site_centroid <- vapply(seq_len(nrow(sample_to_centroid)), function(i) {
+  s <- as.character(sample_to_centroid$site[i])
+  sample_vec <- pca$x[i, pcs_use_outlier, drop = TRUE]
+  centroid_vec <- as.numeric(site_centroids_pca[site_centroids_pca$site == s, pc_cols_outlier, drop = TRUE])
+  sqrt(sum((sample_vec - centroid_vec)^2))
+}, numeric(1))
+
+outlier_flags <- do.call(
+  rbind,
+  lapply(split(sample_to_centroid, sample_to_centroid$site), function(df) {
+    q1 <- stats::quantile(df$distance_to_site_centroid, probs = 0.25, na.rm = TRUE)
+    q3 <- stats::quantile(df$distance_to_site_centroid, probs = 0.75, na.rm = TRUE)
+    iqr <- q3 - q1
+    cutoff <- q3 + 1.5 * iqr
+    df$site_outlier_cutoff <- cutoff
+    df$potential_outlier <- df$distance_to_site_centroid > cutoff
+    df
+  })
+)
+
+rownames(sample_to_centroid) <- NULL
+rownames(outlier_flags) <- NULL
+
+write_table_safe(
+  sample_to_centroid[, c("sample", "site", "distance_to_site_centroid")],
+  "sample_distance_to_site_centroid.csv"
+)
+
+write_table_safe(
+  outlier_flags[, c("sample", "site", "distance_to_site_centroid", "site_outlier_cutoff", "potential_outlier")],
+  "potential_outliers_by_site.csv"
+)
+
+outlier_table <- outlier_flags[, c(
+  "sample",
+  "site",
+  "distance_to_site_centroid",
+  "site_outlier_cutoff",
+  "potential_outlier"
+)]
+rownames(outlier_table) <- NULL
+
+knitr::kable(
+  outlier_table,
+  digits = 3,
+  caption = "Potential outlier flags based on within-site distance to centroid.",
+  row.names = FALSE
+)
+```
+
+Outlier screening identified three potential within-site outliers, one each from H3, H4,
+and H5. These samples were more distant from their site centroids than their site-mates, but
+none was sufficiently extreme to justify exclusion. They are therefore best interpreted as part of
+the biological heterogeneity expected in wild populations rather than as evidence of technical
+failure.
+
+# 14. Site-centroid distance summaries
+
+The previous analyses show whether site structure exists, but they do not directly summarize how
+that structure is distributed along the river sequence. To address this, we calculate distances from
+each site centroid to the reference site, and also between adjacent site centroids along the river.
+
+These summaries help distinguish two non-exclusive patterns:
+
+* progressive downstream divergence from H2
+* sharper local discontinuities between neighboring sites
+
+```{r}
+pcs_use <- seq_len(min(pca_n_axes_for_centroid_dist, ncol(pca$x)))
+pc_cols <- colnames(pca$x)[pcs_use]
+
+site_centroids <- aggregate(
+  pca$x[, pcs_use, drop = FALSE],
+  by = list(site = meta$site),
+  FUN = mean
+)
+
+site_centroids$site <- factor(site_centroids$site, levels = site_levels_present)
+site_centroids <- site_centroids[order(site_centroids$site), , drop = FALSE]
+rownames(site_centroids) <- as.character(site_centroids$site)
+
+stopifnot(all(pc_cols %in% colnames(site_centroids)))
+stopifnot(!"site" %in% pc_cols)
+
+centroid_distance_axis_audit <- data.frame(
+  n_pcs_used = length(pc_cols),
+  pc_axes_used = paste(pc_cols, collapse = ";"),
+  non_pc_columns_used = any(!grepl("^PC[0-9]+$", pc_cols)),
+  status = "PC columns selected by name; metadata columns excluded",
+  stringsAsFactors = FALSE
+)
+
+write_table_safe(
+  centroid_distance_axis_audit,
+  "centroid_distance_axis_audit.csv"
+)
+
+ref_vec <- as.numeric(site_centroids[as.character(reference_site), pc_cols, drop = TRUE])
+
+dist_to_ref <- data.frame(
+  site = as.character(site_centroids$site),
+  centroid_distance_to_reference = vapply(seq_len(nrow(site_centroids)), function(i) {
+    this_vec <- as.numeric(site_centroids[i, pc_cols, drop = TRUE])
+    sqrt(sum((this_vec - ref_vec)^2))
+  }, numeric(1)),
+  n_pcs_used = length(pc_cols),
+  pc_axes_used = paste(pc_cols, collapse = ";"),
+  stringsAsFactors = FALSE
+)
+
+write_table_safe(dist_to_ref, "site_centroid_distance_to_reference.csv")
+
+adjacent_dist <- do.call(
+  rbind,
+lapply(seq_len(nrow(site_centroids) - 1), function(i) {
+    a <- as.numeric(site_centroids[i, pc_cols, drop = TRUE])
+    b <- as.numeric(site_centroids[i + 1, pc_cols, drop = TRUE])
+    data.frame(
+      upstream = as.character(site_centroids$site[i]),
+      downstream = as.character(site_centroids$site[i + 1]),
+      centroid_distance = sqrt(sum((a - b)^2)),
+      n_pcs_used = length(pc_cols),
+      pc_axes_used = paste(pc_cols, collapse = ";"),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+adjacent_dist$contrast_file <- paste(adjacent_dist$upstream, adjacent_dist$downstream, sep = "_to_")
+adjacent_dist$contrast_plot <- paste(adjacent_dist$upstream, adjacent_dist$downstream, sep = " -> ")
+
+write_table_safe(adjacent_dist, "adjacent_site_centroid_distances.csv")
+```
+
+## 14a. Distance to reference centroid
+
+```{r}
+p_refdist <- ggplot2::ggplot(dist_to_ref, ggplot2::aes(x = site, y = centroid_distance_to_reference, fill = site)) +
+  ggplot2::geom_col() +
+  ggplot2::labs(
+    title = "Centroid distance to reference site (H2)",
+    x = "Site",
+    y = paste0("Euclidean distance using first ", length(pcs_use), " PCs")
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position = "none")
+
+p_refdist
+save_plot_dual(p_refdist, "10_site_centroid_distance_to_reference", width = 8, height = 5, dpi = plot_dpi)
+```
+
+## 14b. Distances between adjacent site centroids
+
+```{r}
+# Adjacent site centroid distances in PCA space
+
+# Shared Figure 2 styling constants
+# Keep these identical to the PCA panel.
+panel_border_col <- "black"
+panel_border_lwd <- 0.45
+panel_grid_col <- "grey88"
+panel_grid_lwd <- 0.35
+
+site_order_centroids <- c(
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "H7"
+)
+
+site_centroids_ordered <- site_centroids %>%
+  dplyr::mutate(
+    site = factor(as.character(site), levels = site_order_centroids)
+  ) %>%
+  dplyr::arrange(site)
+
+adjacent_dist <- do.call(
+  rbind,
+  lapply(seq_len(nrow(site_centroids_ordered) - 1), function(i) {
+    up <- as.character(site_centroids_ordered$site[i])
+    dn <- as.character(site_centroids_ordered$site[i + 1])
+
+    up_vec <- as.numeric(site_centroids_ordered[i, pc_cols, drop = FALSE])
+    dn_vec <- as.numeric(site_centroids_ordered[i + 1, pc_cols, drop = FALSE])
+
+    data.frame(
+      upstream = up,
+      downstream = dn,
+      centroid_distance = sqrt(sum((dn_vec - up_vec)^2)),
+      n_pcs_used = length(pc_cols),
+      pc_axes_used = paste(pc_cols, collapse = ";"),
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+adjacent_dist$contrast <- paste(
+  adjacent_dist$upstream,
+  adjacent_dist$downstream,
+  sep = "_to_"
+)
+
+adjacent_dist$contrast_plot <- paste0(
+  adjacent_dist$upstream,
+  " -> ",
+  adjacent_dist$downstream
+)
+
+# Highlight the two WWTP-associated step changes used in the publication panel
+adjacent_dist$is_wwtp_transition <- adjacent_dist$contrast %in% c(
+  "H2_to_H3",
+  "H5_to_H6"
+)
+
+write_table_safe(
+  adjacent_dist,
+  "adjacent_site_centroid_distances.csv"
+)
+
+knitr::kable(
+  adjacent_dist,
+  digits = 3,
+  caption = "Distances between adjacent site centroids in PCA space.",
+  row.names = FALSE
+)
+
+adjacent_dist_plot <- adjacent_dist %>%
+  dplyr::mutate(
+    contrast_plot = factor(
+      contrast_plot,
+      levels = rev(c(
+        "H2 -> H3",
+        "H3 -> H4",
+        "H4 -> H5",
+        "H5 -> H6",
+        "H6 -> H7"
+      ))
+    )
+  )
+
+label_offset_adj <- max(
+  adjacent_dist_plot$centroid_distance,
+  na.rm = TRUE
+) * 0.04
+
+xmax_adj <- max(
+  adjacent_dist_plot$centroid_distance,
+  na.rm = TRUE
+) * 1.25
+
+p_adjacent <- ggplot2::ggplot(
+  adjacent_dist_plot,
+  ggplot2::aes(
+    x = centroid_distance,
+    y = contrast_plot
+  )
+) +
+  ggplot2::geom_segment(
+    ggplot2::aes(
+      x = 0,
+      xend = centroid_distance,
+      y = contrast_plot,
+      yend = contrast_plot
+    ),
+    linewidth = 0.7,
+    colour = "grey60"
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(
+      fill = is_wwtp_transition
+    ),
+    shape = 21,
+    size = 4.6,
+    stroke = 1.0,
+    colour = "black",
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(
+      x = centroid_distance + label_offset_adj,
+      label = sprintf("%.1f", centroid_distance)
+    ),
+    hjust = 0,
+    size = 3.6,
+    colour = "black"
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c(
+      "TRUE" = "grey65",
+      "FALSE" = "white"
+    ),
+    guide = "none"
+  ) +
+  ggplot2::coord_cartesian(
+    xlim = c(0, xmax_adj),
+    clip = "off"
+  ) +
+  ggplot2::labs(
+    title = "",
+    x = paste0(
+      "Centroid distance (Euclidean; first ",
+      length(pcs_use),
+      " PCs)"
+    ),
+    y = NULL
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    legend.position = "none",
+
+    panel.background = ggplot2::element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = ggplot2::element_rect(
+      fill = "white",
+      colour = NA
+    ),
+
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(
+      colour = panel_grid_col,
+      linewidth = panel_grid_lwd
+    ),
+
+    panel.border = ggplot2::element_rect(
+      colour = panel_border_col,
+      fill = NA,
+      linewidth = panel_border_lwd
+    ),
+
+    axis.title = ggplot2::element_text(
+      face = "bold",
+      colour = "black"
+    ),
+    axis.text.x = ggplot2::element_text(
+      colour = "grey25"
+    ),
+    axis.text.y = ggplot2::element_text(
+      face = "bold",
+      colour = "grey25"
+    ),
+
+    plot.margin = ggplot2::margin(8, 24, 8, 8)
+  )
+
+p_adjacent
+
+# Main export
+save_plot_dual(
+  p_adjacent,
+  "11_adjacent_site_centroid_distances",
+  width = 5.6,
+  height = 4.8,
+  dpi = 600
+)
+
+# Standalone export for manuscript figure assembly
+save_plot_dual(
+  p_adjacent,
+  "Figure2B_adjacent_centroid_distances_publication",
+  width = 3.8,
+  height = 5.9,
+  dpi = 600
+)
+```
+
+The site-centroid summaries clarified that transcriptomic divergence along the river was not evenly
+distributed. Relative to H2, some downstream sites were strongly displaced in multivariate
+space, but the pattern was not monotonic. Adjacent-site distances were largest between H2 and
+H3 and between H3 and H4, and were smaller for the remaining transitions. This
+argues against a simple model of steady downstream accumulation of transcriptomic change and
+instead supports a non-uniform trajectory with stronger early reorganization followed by compara-
+tively smaller downstream adjustments.
+
+# 15. Overall interpretation
+
+Overall, the Holtemme dataset shows significant but moderate site-level structuring of global tran-
+scriptome profiles in wild Gammarus pulex. Ordination, clustering, variable-gene structure, and
+formal multivariate testing all support the conclusion that site identity is associated with repro-
+ducible transcriptomic differences, although these differences remain embedded within substantial
+within-site heterogeneity. The retention of three mild outliers does not alter that conclusion. At
+the global-expression level, the dominant pattern is therefore not one of discrete site classes, but
+of partial organization across the gradient, with the strongest multivariate shifts occurring in the
+early part of the river sequence.
+
+# 16. Results synthesis
+
+A practical outline for writing this Results section is:
+
+1. **Dataset composition and QC**
+   State that 30 German samples from six Holtemme sites were retained, that sequencing depth and
+   gene detection were broadly comparable among sites, and that low-count filtering reduced the
+   matrix to 151,508 genes without removing samples.
+
+2. **Global ordination structure**
+   Describe the PCA as showing moderate but incomplete site-level organization, with substantial
+   overlap among sites and variance distributed across multiple axes rather than dominated by a
+   single component.
+
+3. **Distance-based support for site organization**
+   Use the sample-distance heatmap, dendrogram, and top-variable-gene heatmap to show that
+   site-related similarity exists but is not perfectly discrete.
+
+4. **Formal statistical support**
+   Present the PERMANOVA and dispersion results to show that site identity significantly structures
+   global transcriptome variation and that this result is not driven by unequal within-site dispersion.
+
+5. **Outliers and gradient shape**
+   Note that a small number of samples were flagged as potential within-site outliers but were
+   retained, and conclude with the centroid-distance results showing that the strongest transcriptomic
+   shifts occurred between H2 and H3 and between H3 and H4 rather than
+   accumulating evenly downstream.
+
+# 17. Session information
+
+```{r}
+capture.output(sessionInfo(), file = file.path(logs_dir, "sessionInfo.txt"))
+sessionInfo()
+```

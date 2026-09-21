@@ -1,0 +1,31 @@
+sample_code,legacy_site_id,station_tag,display_label,site_name,sampling_date,country
+DE_01,HOL01,H2,H2,UPS Silstedt,29.10.2021,Germany
+DE_02,HOL01,H2,H2,UPS Silstedt,29.10.2021,Germany
+DE_03,HOL01,H2,H2,UPS Silstedt,29.10.2021,Germany
+DE_04,HOL01,H2,H2,UPS Silstedt,29.10.2021,Germany
+DE_05,HOL01,H2,H2,UPS Silstedt,29.10.2021,Germany
+DE_06,HOL02,H3,H3,DS Silstedt,29.10.2021,Germany
+DE_07,HOL02,H3,H3,DS Silstedt,29.10.2021,Germany
+DE_08,HOL02,H3,H3,DS Silstedt,29.10.2021,Germany
+DE_09,HOL02,H3,H3,DS Silstedt,29.10.2021,Germany
+DE_10,HOL02,H3,H3,DS Silstedt,29.10.2021,Germany
+DE_11,HOL03,H4,H4,Mahndorf,30.10.2021,Germany
+DE_12,HOL03,H4,H4,Mahndorf,30.10.2021,Germany
+DE_13,HOL03,H4,H4,Mahndorf,30.10.2021,Germany
+DE_14,HOL03,H4,H4,Mahndorf,30.10.2021,Germany
+DE_15,HOL03,H4,H4,Mahndorf,30.10.2021,Germany
+DE_16,HOL04,H5,H5,UPS Halberstadt,29.10.2021,Germany
+DE_17,HOL04,H5,H5,UPS Halberstadt,29.10.2021,Germany
+DE_18,HOL04,H5,H5,UPS Halberstadt,29.10.2021,Germany
+DE_19,HOL04,H5,H5,UPS Halberstadt,29.10.2021,Germany
+DE_20,HOL04,H5,H5,UPS Halberstadt,29.10.2021,Germany
+DE_21,HOL05,H6,H6,DS Halberstadt,29.10.2021,Germany
+DE_22,HOL05,H6,H6,DS Halberstadt,29.10.2021,Germany
+DE_23,HOL05,H6,H6,DS Halberstadt,29.10.2021,Germany
+DE_24,HOL05,H6,H6,DS Halberstadt,29.10.2021,Germany
+DE_25,HOL05,H6,H6,DS Halberstadt,29.10.2021,Germany
+DE_26,HOL06,H7,H7,Nienhagen,30.10.2021,Germany
+DE_27,HOL06,H7,H7,Nienhagen,30.10.2021,Germany
+DE_28,HOL06,H7,H7,Nienhagen,30.10.2021,Germany
+DE_29,HOL06,H7,H7,Nienhagen,30.10.2021,Germany
+DE_30,HOL06,H7,H7,Nienhagen,30.10.2021,Germany

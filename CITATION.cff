@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this workflow or research compendium, please cite the associated article."
+title: "Holtemme Gammarus Ecotoxicogenomics"
+type: software
+version: 1.0.0
+date-released: 2026-09-21
+repository-code: "https://github.com/miloes114/holtemme-gammarus-ecotoxicogenomics"
+abstract: "Executable workflow and reproducibility metadata for the Holtemme field ecotoxicogenomics study."
+authors:
+  - family-names: Escobar-Sierra
+    given-names: Camilo
+  - family-names: Weichert
+    given-names: Fabian G.
+  - family-names: Krauss
+    given-names: Martin
+    orcid: "https://orcid.org/0000-0002-0362-4244"
+  - family-names: Hollert
+    given-names: Henner
+  - family-names: Inostroza
+    given-names: Pedro A.

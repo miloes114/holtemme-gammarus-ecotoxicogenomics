@@ -1,0 +1,5 @@
+release_surface	artifact_class	inclusion_rule	authority	status
+GitHub	workflow_source	Executable code, compact metadata, documentation, configuration, tests, and bounded HTML reports.	Git repository	active
+Supplementary_Information	PDF	Supplementary Figures S1-S5 and Supplementary Tables S1-S7 only.	Manuscript and SI master	pending_artifact_reconciliation
+Zenodo	frozen_compendium	DP01-DP07, figure-source data, complete machine-readable outputs, provenance, reports, and frozen code.	Publication release manifest	pending_future_build
+
