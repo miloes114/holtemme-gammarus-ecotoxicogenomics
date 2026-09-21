@@ -1,6 +1,6 @@
 # Reproducibility boundary
 
-This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. Those release-scale objects are intentionally not stored in GitHub.
+This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study. Primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources. Those release-scale objects are intentionally not stored in GitHub.
 
 The repository supplies:
 

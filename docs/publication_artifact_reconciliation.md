@@ -7,8 +7,8 @@ This release boundary contains exactly 17 journal-facing objects: Figures 1–5,
 - Figure 3 is the current manuscript label for legacy `Figure4A_DEG_burden_gradient_plus_WWTP_publication.*` and `Figure4B_effect_size_gradient_plus_WWTP_publication.*`. `contrast_summary.csv` is authoritative; the reference/local contrast summaries and priority table are reconstruction/support inputs.
 - Figure 4 traceback uses the three canonical provenance tables (figure4_family_cell_provenance.tsv, figure4_source_term_family_provenance.tsv, and figure4_gene_term_family_provenance.tsv) plus the ontology-specific family/semantic tables listed in the registry. figure4_gene_provenance_summary.tsv is a derived diagnostic QC summary generated from the gene-term provenance table and staged under DP05 provenance; it is not a primary Figure 4 reconstruction table.
 - Figure 5 uses the four Step 08 panel tables. DP06 remains upstream WGCNA network-selection evidence and is intentionally not assigned a direct paper-facing object.
-- S1 and S2 are currently identifiable at the Rmd-object level: S1 uses `chemical_wide`/`chemical_pca$x`; S2 uses `moa_wide`/`moa_pca$x` and the chemistry descriptor objects. The current build does not contain standalone composite exports for every S1/S2 panel, so no new analytical table is fabricated; export reconciliation is a Phase 2 packaging item.
-- S3 and S4 have canonical matrix/table/plot sources. S5 retains the historical `figure5_functional_family_linked_candidate_gene_heatmap` filename while mapping it to the current SI label.
+- S1 and S2 now have exact V9.1 SI publication rasters in the final release candidate. S1 is an upstream chemistry result with graphical-only legend repair; S2 is the exact three-panel SI composite backed by frozen DP01 source tables. No upstream chemistry mapping is reconstructed.
+- S3 now has the exact V9.1 two-panel SI composite plus its canonical DP03 heatmap/dendrogram components. S4 and S5 retain canonical internal plot sources; S5 retains the historical `figure5_functional_family_linked_candidate_gene_heatmap` filename while mapping it to the current SI label.
 
 ## P0 manuscript/SI correction
 

@@ -46,6 +46,8 @@ The frozen v1.0.0 research compendium is prepared for Zenodo deposit; its DOI wi
 
 ## Publication architecture
 
+DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study; primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources.
+
 The publication-facing evidence hierarchy is manuscript → Supplementary Information → Zenodo data packages DP01–DP07 → executable GitHub workflow. The Supplementary Information contains Figures S1–S5 and Tables S1–S7.
 
 See [publication architecture](docs/publication_architecture.md) and [site identifiers](docs/site_identifiers.md).

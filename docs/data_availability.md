@@ -1,6 +1,6 @@
 # Data availability
 
-GitHub contains workflow code and compact interpretive metadata. It does not duplicate primary chemistry concentrations, raw RNA-seq reads, complete processed outputs, or frozen release-scale evidence tables.
+GitHub contains workflow code and compact interpretive metadata. DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study. Primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources. It does not duplicate primary chemistry concentrations, raw RNA-seq reads, complete processed outputs, or frozen release-scale evidence tables.
 
 | Resource | Authority | GitHub treatment |
 |---|---|---|
