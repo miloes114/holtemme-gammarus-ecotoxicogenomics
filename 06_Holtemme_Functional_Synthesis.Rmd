@@ -1,43 +1,87 @@
 ---
 title: "Holtemme functional synthesis"
-author: "Camilo Escobar"
-output: html_document
+output:
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  project_dir: !r Sys.getenv("HOLTEMME_PROJECT_DIR", ".")
+  figure_output_dir: !r Sys.getenv("HOLTEMME_FIGURE_OUTPUT_DIR", "")
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
-project_dir <- normalizePath(Sys.getenv("HOLTEMME_PROJECT_DIR", unset = getwd()), winslash = "/")
-root <- file.path(project_dir, "Results_06_Functional_Synthesis", "tables", "figure4_functional_landscape")
-read_tsv <- function(n) { p <- file.path(root, n); if (file.exists(p)) utils::read.delim(p, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE) else data.frame() }
-inventory <- read_tsv("figure4_semantic_feature_inventory.tsv")
-cells <- read_tsv("figure4_family_cell_provenance.tsv")
-assignments <- read_tsv("functional_family_reviewed_assignments.tsv")
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+project_dir <- normalizePath(params$project_dir, mustWork = TRUE)
+release_root <- if (dir.exists(file.path(project_dir, "DP05_functional_evidence"))) project_dir else dirname(project_dir)
+candidate_sources <- c(
+  file.path(project_dir, "DP05_functional_evidence", "provenance", "figure4", "figure4_family_cell_provenance.tsv"),
+  file.path(release_root, "DP05_functional_evidence", "provenance", "figure4", "figure4_family_cell_provenance.tsv"),
+  file.path(project_dir, "support", "figure4", "figure4_family_cell_provenance.tsv"),
+  file.path(project_dir, "support", "echogo_v014_end_to_end", "figure4", "figure4_v014_integrated_family_cell_source.tsv")
+)
+figure_source <- candidate_sources[file.exists(candidate_sources)][1L]
+if (is.na(figure_source)) stop("No frozen Figure 4 family-cell provenance table was found.")
+figure_output_dir <- params$figure_output_dir
+if (!nzchar(figure_output_dir)) {
+  figure_output_dir <- if (dir.exists(file.path(project_dir, "DP05_functional_evidence", "publication_artifacts", "Figure_4"))) file.path(project_dir, "DP05_functional_evidence", "publication_artifacts", "Figure_4") else if (dir.exists(file.path(release_root, "DP05_functional_evidence", "publication_artifacts", "Figure_4"))) file.path(release_root, "DP05_functional_evidence", "publication_artifacts", "Figure_4") else file.path(project_dir, "Results_06_Functional_Synthesis", "final_paper_figures")
+}
+dir.create(figure_output_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
-# Functional evidence model
+# Scope and frozen input
 
-Step 06 integrates target-supported GOseq evidence, matched-background
-annotation-context hypotheses, and default-domain exploratory hypotheses. Exact
-GO evidence is retained independently of semantic representability. RRvGO Rel
-reduction uses `org.Dm.eg.db` as the declared semantic proxy; obsolete terms
-without exact replacements and current terms unrepresented in the proxy are
-recorded separately.
+This report reconstructs the publication Figure 4 from the frozen v0.1.4
+family-cell provenance table. The table is the scientific input; the plotting
+code does not rerun enrichment, semantic reduction, resolver calls, or family
+assignment. Target-supported, matched-background, and default-domain
+exploratory evidence remain separate provenance tiers.
 
-The final semantic inventory contains 248 integrated features: 120
-target-supported, 10 matched-background, and 118 default-domain exploratory.
-The reviewed family table is neutral and contains one row per integrated feature.
-
-```{r tables}
-if (nrow(assignments)) knitr::kable(utils::head(assignments, 20), caption = "Final reviewed family assignments (first 20 rows)")
-if (nrow(cells)) knitr::kable(utils::head(cells, 20), caption = "Figure 4 family-cell provenance (first 20 rows)")
+```{r figure4-input}
+figure4_family_cells <- read.delim(figure_source, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
+figure4_family_cells |> dplyr::summarise(
+  family_cells = dplyr::n(),
+  displayed_cells = sum(toupper(display_in_figure) %in% c("TRUE", "T", "1")),
+  target_features = sum(as.integer(n_target_supported_features)),
+  matched_features = sum(as.integer(n_matched_background_hypothesis_features)),
+  exploratory_features = sum(as.integer(n_default_domain_exploratory_only_features))
+)
 ```
 
-# Publication outputs
+# Figure 4: functional-response landscape
 
-Figure 4 contains 101 displayed family cells with mutually exclusive
-compositions of 43 target-only, 18 target-plus-exploratory, one matched-only,
-four matched-plus-exploratory, and 35 exploratory-only cells. Evidence geometry
-is nested: outer total, middle target plus matched-background, inner target.
-There is no score or recurrence encoding. GO:0005509 in H7 versus H2 (MF) is
-assigned to “Small-molecule and cofactor binding” as default-domain exploratory
-evidence. The target-only S5 candidate-gene panel contains 16 genes.
+The complete reviewed construction and save logic is kept in the repository
+script `scripts/reconstruct_figure4_from_frozen_provenance.R`. The Rmd calls
+that same code path, writes the canonical PDF/PNG/SVG bundle, and leaves the
+publication figure embedded in this report.
+
+```{r build-figure4, fig.width=13.5, fig.height=15.2, out.width="100%"}
+figure4_script <- file.path(project_dir, "scripts", "reconstruct_figure4_from_frozen_provenance.R")
+if (!file.exists(figure4_script)) stop("Figure 4 reconstruction script is missing: ", figure4_script)
+status <- system2(
+  file.path(R.home("bin"), "Rscript.exe"),
+  args = c(figure4_script, figure_source, figure_output_dir)
+)
+if (!identical(status, 0L)) stop("Figure 4 reconstruction failed")
+figure4_png <- file.path(figure_output_dir, "figure4_functional_response_landscape.png")
+figure4_pdf <- file.path(figure_output_dir, "figure4_functional_response_landscape.pdf")
+figure4_svg <- file.path(figure_output_dir, "figure4_functional_response_landscape.svg")
+stopifnot(file.exists(figure4_png), file.exists(figure4_pdf), file.exists(figure4_svg))
+knitr::include_graphics(figure4_png)
+```
+
+**Figure 4 legend.** Bubble area represents the number of distinct semantic
+features in each reviewed family cell. Nested fills preserve the evidence
+hierarchy: target-supported Gammarus evidence, matched-background
+annotation-context hypotheses, and default-domain exploratory hypotheses.
+Annotation-context evidence is hypothesis-generating and is not independent
+biological replication or cross-species validation.
+
+```{r figure4-output-check}
+data.frame(
+  source = figure_source,
+  pdf = figure4_pdf,
+  png = figure4_png,
+  svg = figure4_svg,
+  png_md5 = unname(tools::md5sum(figure4_png))
+)
+```

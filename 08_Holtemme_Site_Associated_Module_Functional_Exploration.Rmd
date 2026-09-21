@@ -5765,7 +5765,7 @@ least 95% of site-stratified bootstrap samples. The magenta module is reported
 separately because its sparse annotation does not support pathway-level
 interpretation.
 
-```{r final-paper-facing-wgcna-figure, fig.width=13, fig.height=10, out.width="100%"}
+```{r final-paper-facing-wgcna-figure, fig.width=14, fig.height=11.4, out.width="100%"}
 module_plot_colours <- c(
   MEturquoise = "#33B7B7",
   MEgreen = "#238B45",
@@ -6580,6 +6580,25 @@ if (!identical(layout_v2_preview_status, 0L) || !file.exists(paste0(layout_v2_pr
 if (file.exists(layout_v2_preview_path)) unlink(layout_v2_preview_path)
 file.rename(paste0(layout_v2_preview_prefix, ".png"), layout_v2_preview_path)
 
+## Promote the reviewed layout candidate to the canonical publication stem.
+## This keeps the report/Rmd output synchronized with the released Figure 5.
+final_wgcna_stem <- file.path(
+  plots_dir,
+  "Figure_WGCNA_site_associated_modules_final"
+)
+save_plot_bundle(
+  layout_wgcna_figure,
+  final_wgcna_stem,
+  width = layout_width,
+  height = layout_height,
+  dpi = 300
+)
+file.copy(
+  layout_v2_preview_path,
+  paste0(final_wgcna_stem, "_journalwidth_preview.png"),
+  overwrite = TRUE
+)
+
 write_csv_safe(
   profile_data,
   file.path(tables_dir, "figure_wgcna_final_panel_A_eigengenes.csv")
@@ -6597,7 +6616,7 @@ write_csv_safe(
   file.path(tables_dir, "figure_wgcna_final_panel_D_functional_families.csv")
 )
 
-final_wgcna_figure
+layout_wgcna_figure
 ```
 
 **Figure legend.** Site-associated co-expression modules retained after the
