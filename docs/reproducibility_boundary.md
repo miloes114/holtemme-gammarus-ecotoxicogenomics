@@ -11,5 +11,6 @@ The repository supplies:
 - pinned EchoGO 0.1.4 provenance;
 - eight bounded rendered HTML reports.
 
-The future Zenodo release supplies frozen processed inputs, complete result tables, figure-source data, provenance records, checksums, and DP01-DP07. Raw RNA-seq and the primary chemistry concentration matrix remain external authoritative records unless redistribution is explicitly authorized.
+The frozen Zenodo release candidate supplies processed inputs, complete result tables, figure-source data, provenance records, checksums, and DP01-DP07; it is awaiting Zenodo deposition. Raw RNA-seq and the primary chemistry concentration matrix remain external authoritative records unless redistribution is explicitly authorized.
+
 

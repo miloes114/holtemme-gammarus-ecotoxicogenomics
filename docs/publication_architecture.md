@@ -9,6 +9,7 @@ Manuscript
   -> GitHub: executable workflow and concise reproducibility metadata
 ```
 
-GitHub is deliberately lean. It excludes `Results_*`, processed analytical inputs, reference-scale annotation files, local installed R libraries, historical EchoGO backups, and Zenodo payload archives.
+GitHub is deliberately lean: it contains the executable workflow and concise reproducibility metadata. It excludes `Results_*`, processed analytical inputs, reference-scale annotation files, local installed R libraries, historical EchoGO backups, and Zenodo payload archives.
 
-The future Zenodo compendium will organize frozen evidence as DP01 chemistry, DP02 RNA-seq inputs/QC, DP03 global structure, DP04 differential expression, DP05 functional evidence, DP06 WGCNA, and DP07 site-associated modules. Registry rows for manuscript and SI artifacts will be populated only after reconciliation against the accepted manuscript and SI master.
+The frozen Zenodo release candidate awaiting deposition organizes evidence as DP01 chemistry, DP02 RNA-seq inputs/QC, DP03 global structure, DP04 differential expression, DP05 functional evidence, DP06 WGCNA, and DP07 site-associated modules. The synchronized SI is authoritative for Figures S1-S5 and Tables S1-S7; the GitHub registry records the executable workflow and concise metadata.
+

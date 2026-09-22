@@ -127,6 +127,7 @@ if (is.na(candidate_file) || is.na(candidate_mat_file) || is.na(candidate_heatma
   compact_candidate_table <- candidate_panel[, c("candidate_display_label", "primary_family", "family_contrasts"), drop = FALSE]
   names(compact_candidate_table) <- c("Gene", "Functional family", "Principal linked contrast or provenance context")
   print(knitr::kable(compact_candidate_table, caption = "Final 16-gene target-supported S5 panel"))
+  cat("Across the frozen H2-H7 site means, ALDOA was relatively higher at H2 and lower across H3-H5 before a modest recovery at H6-H7; MIOX peaked at H5 and remained relatively high at H6-H7; KDSR also peaked at H5 and was relatively lower at H7; FABP4 was relatively lower at H2-H4 and H6 and higher at H7; CD209 was highest at H7 and lowest at H3, with a non-monotonic pattern; and jhamt was relatively higher at H2, lower at H4, and varied non-monotonically across the remaining sites. These are descriptive site-mean VST observations within the selected panel.\\n\\n")
   cat("Colours are within-gene relative expression: red indicates relatively higher expression for a gene across sites and blue indicates relatively lower expression. Candidate selection is based on traceable target-supported functional evidence. The heatmap does not establish biomarkers, causal chemical drivers, pathway activation magnitude, or regulatory networks.")
 }
 ```

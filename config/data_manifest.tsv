@@ -7,11 +7,11 @@ EXT_CHEMISTRY	external_authoritative_source	DP01	10.5281/zenodo.22143080		refere
 EXT_RNASEQ	external_authoritative_source	DP02	SRP571512		referenced_not_duplicated		SRA accession for raw RNA-seq inputs; no raw reads are duplicated in this repository.
 EXT_TRANSCRIPTOME	external_authoritative_source	DP02			citation_only_no_identifier_in_current_source		Escobar-Sierra et al. 2025 Gammarus pulex transcriptome/annotation resource; identifier not recorded in current source and is intentionally not invented.
 DEP_ECHOGO	software_dependency	DP05	https://github.com/miloes114/EchoGo		pinned_external_dependency		EchoGO 0.1.4 pinned at commit dcf41371b20cccb2914852dc2c0436ecba62c559.
-DP01_CHEMISTRY_DERIVED	compact_analytical_input	DP01	10.5281/zenodo.22143080	zenodo_only_pending	zenodo_only_pending		Analysis-ready chemistry descriptors and Rmd-derived S1/S2 objects; broader DP01 payload is Phase 2.
-DP03_GLOBAL_TRANSCRIPTOME	compact_analytical_input	DP03	SRP571512	zenodo_only_pending	zenodo_only_pending		PCA, centroid-distance, distance-matrix, and RDA response tables used by Figures 2/S3/S4 and Tables S3/S4.
-DP04_DE_SUMMARY	compact_analytical_input	DP04		zenodo_only_pending	zenodo_only_pending		Contrast summary and supporting DE summaries used by Figure 3 and Table S5.
-DP05_FUNCTIONAL	compact_analytical_input	DP05	https://github.com/miloes114/EchoGo	zenodo_only_pending	zenodo_only_pending		Functional provenance, candidate-gene display inputs, and EchoGO-pinned outputs used by Figure 4/S5 and Table S6.
-DP07_WGCNA_PAPER	compact_analytical_input	DP07		zenodo_only_pending	zenodo_only_pending		Paper-facing WGCNA panels and decision evidence used by Figure 5 and Table S7.
+DP01_CHEMISTRY_DERIVED	compact_analytical_input	DP01	10.5281/zenodo.22143080	DP01_chemistry	frozen_release_candidate		Analysis-ready chemistry descriptors and Rmd-derived S1/S2 objects; primary concentration archive remains external.
+DP03_GLOBAL_TRANSCRIPTOME	compact_analytical_input	DP03	SRP571512	DP03_global_transcriptome_structure	frozen_release_candidate		PCA, centroid-distance, distance-matrix, and RDA response tables used by Figures 2/S3/S4 and Tables S3/S4.
+DP04_DE_SUMMARY	compact_analytical_input	DP04		DP04_differential_expression	frozen_release_candidate		Contrast summary and supporting DE summaries used by Figure 3 and Table S5.
+DP05_FUNCTIONAL	compact_analytical_input	DP05	https://github.com/miloes114/EchoGo	DP05_functional_evidence	frozen_release_candidate		Functional provenance, candidate-gene display inputs, and EchoGO-pinned outputs used by Figure 4/S5 and Table S6.
+DP07_WGCNA_PAPER	compact_analytical_input	DP07		DP07_site_associated_modules	frozen_release_candidate		Paper-facing WGCNA panels and decision evidence used by Figure 5 and Table S7.
 
 
 

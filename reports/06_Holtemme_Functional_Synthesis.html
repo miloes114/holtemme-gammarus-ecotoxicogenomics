@@ -466,6 +466,7 @@ if (is.na(candidate_file) || is.na(candidate_mat_file) || is.na(candidate_heatma
   compact_candidate_table &lt;- candidate_panel[, c(&quot;candidate_display_label&quot;, &quot;primary_family&quot;, &quot;family_contrasts&quot;), drop = FALSE]
   names(compact_candidate_table) &lt;- c(&quot;Gene&quot;, &quot;Functional family&quot;, &quot;Principal linked contrast or provenance context&quot;)
   print(knitr::kable(compact_candidate_table, caption = &quot;Final 16-gene target-supported S5 panel&quot;))
+  cat(&quot;Across the frozen H2-H7 site means, ALDOA was relatively higher at H2 and lower across H3-H5 before a modest recovery at H6-H7; MIOX peaked at H5 and remained relatively high at H6-H7; KDSR also peaked at H5 and was relatively lower at H7; FABP4 was relatively lower at H2-H4 and H6 and higher at H7; CD209 was highest at H7 and lowest at H3, with a non-monotonic pattern; and jhamt was relatively higher at H2, lower at H4, and varied non-monotonically across the remaining sites. These are descriptive site-mean VST observations within the selected panel.\\n\\n&quot;)
   cat(&quot;Colours are within-gene relative expression: red indicates relatively higher expression for a gene across sites and blue indicates relatively lower expression. Candidate selection is based on traceable target-supported functional evidence. The heatmap does not establish biomarkers, causal chemical drivers, pathway activation magnitude, or regulatory networks.&quot;)
 }</code></pre>
 <p>The final panel contains <strong>16 displayed genes</strong> across
@@ -572,12 +573,20 @@ rows are target-supported evidence only.</p>
 </tr>
 </tbody>
 </table>
-<p>Colours are within-gene relative expression: red indicates relatively
-higher expression for a gene across sites and blue indicates relatively
-lower expression. Candidate selection is based on traceable
-target-supported functional evidence. The heatmap does not establish
-biomarkers, causal chemical drivers, pathway activation magnitude, or
-regulatory networks.</p>
+<p>Across the frozen H2-H7 site means, ALDOA was relatively higher at H2
+and lower across H3-H5 before a modest recovery at H6-H7; MIOX peaked at
+H5 and remained relatively high at H6-H7; KDSR also peaked at H5 and was
+relatively lower at H7; FABP4 was relatively lower at H2-H4 and H6 and
+higher at H7; CD209 was highest at H7 and lowest at H3, with a
+non-monotonic pattern; and jhamt was relatively higher at H2, lower at
+H4, and varied non-monotonically across the remaining sites. These are
+descriptive site-mean VST observations within the selected panel.are
+within-gene relative expression: red indicates relatively higher
+expression for a gene across sites and blue indicates relatively lower
+expression. Candidate selection is based on traceable target-supported
+functional evidence. The heatmap does not establish biomarkers, causal
+chemical drivers, pathway activation magnitude, or regulatory
+networks.</p>
 </div>
 
 

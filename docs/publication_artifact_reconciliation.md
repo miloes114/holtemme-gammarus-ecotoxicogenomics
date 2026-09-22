@@ -22,7 +22,7 @@ DP01 should carry derived/analysis-ready chemistry objects and cite that primary
 
 The six historical `Supplementary_Data_*.xlsx` workbooks are outside the target release and are not required by any registry. DP02 (RNA-seq inputs/QC) and DP06 (WGCNA selection/network evidence) remain valid upstream packages with zero direct publication artifacts.
 
-## Phase 2 recommendation
+## Frozen release package
 
 - DP01: chemistry provenance, derived site descriptors, chemical/MoA long tables, and standalone S1/S2 exports with the Weichert DOI link.
 - DP02: raw-read/QC provenance and sample-level metadata, without assigning a paper-facing artifact.
@@ -32,4 +32,5 @@ The six historical `Supplementary_Data_*.xlsx` workbooks are outside the target 
 - DP06: retain as upstream network-selection evidence only; no direct SI object.
 - DP07: Step 08 paper-facing WGCNA panel tables, Figure 5, and Table S7.
 
-Broader payload checksums and final Zenodo file lists remain pending Phase 2; the current `config/zenodo_deposit_manifest.tsv` establishes only the 17 publication-artifact source entries.
+The frozen release candidate contains the broader DP01-DP07 payload, package checksums, and the 17 publication-artifact source entries recorded in `config/zenodo_deposit_manifest.tsv`. Zenodo deposition remains an external release action; no Zenodo record is claimed as published here.
+
