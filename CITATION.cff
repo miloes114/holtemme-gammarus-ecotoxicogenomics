@@ -1,35 +1,47 @@
 cff-version: 1.2.0
-message: "If you use this workflow or research compendium, please cite the associated article."
+message: "If you use this workflow or research compendium, please cite the associated dataset and article when published."
 title: "Holtemme Gammarus Ecotoxicogenomics"
 type: software
 version: 1.0.0
-date-released: 2026-09-21
+date-released: 2026-09-22
 repository-code: "https://github.com/miloes114/holtemme-gammarus-ecotoxicogenomics"
 abstract: "Executable workflow and reproducibility metadata for the Holtemme field ecotoxicogenomics study."
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.22896087"
+    description: "Associated v1.0.0 research compendium"
 authors:
   - family-names: Escobar-Sierra
     given-names: Camilo
+    orcid: "https://orcid.org/0000-0001-9105-4378"
   - family-names: Weichert
     given-names: Fabian G.
+    orcid: "https://orcid.org/0000-0002-5995-6790"
   - family-names: Krauss
     given-names: Martin
     orcid: "https://orcid.org/0000-0002-0362-4244"
   - family-names: Hollert
     given-names: Henner
+    orcid: "https://orcid.org/0000-0001-5776-5619"
   - family-names: Inostroza
     given-names: Pedro A.
+    orcid: "https://orcid.org/0000-0001-7399-8308"
 preferred-citation:
   type: article
   title: "Field ecotoxicogenomics reveals transition-specific molecular responses in a freshwater sentinel across a wastewater-impacted river"
   authors:
     - family-names: Escobar-Sierra
       given-names: Camilo
+      orcid: "https://orcid.org/0000-0001-9105-4378"
     - family-names: Weichert
       given-names: Fabian G.
+      orcid: "https://orcid.org/0000-0002-5995-6790"
     - family-names: Krauss
       given-names: Martin
       orcid: "https://orcid.org/0000-0002-0362-4244"
     - family-names: Hollert
       given-names: Henner
+      orcid: "https://orcid.org/0000-0001-5776-5619"
     - family-names: Inostroza
       given-names: Pedro A.
+      orcid: "https://orcid.org/0000-0001-7399-8308"

@@ -1,6 +1,8 @@
 # Reproducibility boundary
 
-This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study. Primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources. Those release-scale objects are intentionally not stored in GitHub.
+This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. A complete Step 01-08 reconstruction requires the frozen processed inputs and prior-step outputs supplied in the published Zenodo v1.0.0 compendium ([10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)).
+
+DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study. Primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources. Those primary chemistry objects are intentionally not stored in GitHub.
 
 The repository supplies:
 
@@ -11,6 +13,4 @@ The repository supplies:
 - pinned EchoGO 0.1.4 provenance;
 - eight bounded rendered HTML reports.
 
-The frozen Zenodo release candidate supplies processed inputs, complete result tables, figure-source data, provenance records, checksums, and DP01-DP07; it is awaiting Zenodo deposition. Raw RNA-seq and the primary chemistry concentration matrix remain external authoritative records unless redistribution is explicitly authorized.
-
-
+The published Zenodo compendium supplies processed inputs, complete result tables, figure-source data, provenance records, checksums, and DP01-DP07. Raw RNA-seq remains external at SRA `SRP571512`.
