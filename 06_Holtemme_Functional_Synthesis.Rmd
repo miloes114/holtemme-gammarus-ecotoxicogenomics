@@ -85,3 +85,48 @@ data.frame(
   png_md5 = unname(tools::md5sum(figure4_png))
 )
 ```
+
+# Representative genes linked to functional-response families
+
+The candidate-gene panel is the gene-level companion to the Biological Process
+functional synthesis. It contains only final target-supported EchoGO v0.1.4
+candidates with traceable native-ID to GO term to semantic-feature to
+functional-family provenance. The panel is illustrative and is not an
+independent validation set.
+
+```{r candidate-gene-panel, results='asis', fig.width=13.5, fig.height=8.8, out.width='100%'}
+candidate_file <- c(
+  file.path(project_dir, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "candidate_gene_display_panel.tsv"),
+  file.path(release_root, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "candidate_gene_display_panel.tsv"),
+  file.path(project_dir, "support", "echogo_v014_end_to_end", "s5", "candidate_gene_display_panel.tsv")
+)
+candidate_file <- candidate_file[file.exists(candidate_file)][1L]
+candidate_mat_file <- c(
+  file.path(project_dir, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "candidate_gene_expression_site_mean_row_scaled_vst.tsv"),
+  file.path(release_root, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "candidate_gene_expression_site_mean_row_scaled_vst.tsv")
+)
+candidate_mat_file <- candidate_mat_file[file.exists(candidate_mat_file)][1L]
+candidate_heatmap_file <- c(
+  file.path(project_dir, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "figure5_functional_family_linked_candidate_gene_heatmap.png"),
+  file.path(release_root, "DP05_functional_evidence", "publication_artifacts", "Figure_S5", "figure5_functional_family_linked_candidate_gene_heatmap.png")
+)
+candidate_heatmap_file <- candidate_heatmap_file[file.exists(candidate_heatmap_file)][1L]
+if (is.na(candidate_file) || is.na(candidate_mat_file) || is.na(candidate_heatmap_file)) {
+  cat("The frozen 16-gene S5 source is not present in this checkout. The release candidate carries the machine-readable panel and heatmap.")
+} else {
+  candidate_panel <- read.delim(candidate_file, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
+  candidate_mat <- read.delim(candidate_mat_file, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
+  stopifnot(nrow(candidate_panel) == 16L, nrow(candidate_mat) == 16L)
+  candidate_panel <- candidate_panel[order(candidate_panel$selection_rank_global), , drop = FALSE]
+  candidate_mat <- candidate_mat[match(candidate_panel$heatmap_row_label, candidate_mat$heatmap_row_label), , drop = FALSE]
+  candidate_families <- unique(candidate_panel$primary_family)
+  cat("The final panel contains **16 displayed genes** across **", length(candidate_families),
+      " Biological Process families**, using H2-H7 site means derived from **30 individual libraries**. ",
+      "All displayed rows are target-supported evidence only.\n\n", sep = "")
+  cat(sprintf("<p><img src=\"%s\" alt=\"Final 16-gene S5 heatmap\" style=\"display:block; margin:auto; width:100%%;\" /></p>", base64enc::dataURI(file = candidate_heatmap_file, mime = "image/png")))
+  compact_candidate_table <- candidate_panel[, c("candidate_display_label", "primary_family", "family_contrasts"), drop = FALSE]
+  names(compact_candidate_table) <- c("Gene", "Functional family", "Principal linked contrast or provenance context")
+  print(knitr::kable(compact_candidate_table, caption = "Final 16-gene target-supported S5 panel"))
+  cat("Colours are within-gene relative expression: red indicates relatively higher expression for a gene across sites and blue indicates relatively lower expression. Candidate selection is based on traceable target-supported functional evidence. The heatmap does not establish biomarkers, causal chemical drivers, pathway activation magnitude, or regulatory networks.")
+}
+```
