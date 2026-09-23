@@ -70,11 +70,13 @@ knitr::include_graphics(figure4_png)
 ```
 
 **Figure 4 legend.** Bubble area represents the number of distinct semantic
-features in each reviewed family cell. Nested fills preserve the evidence
-hierarchy: target-supported Gammarus evidence, matched-background
-annotation-context hypotheses, and default-domain exploratory hypotheses.
-Annotation-context evidence is hypothesis-generating and is not independent
-biological replication or cross-species validation.
+features in each reviewed family cell. Fill shades distinguish functional
+evidence supported directly in *G. pulex*, matched-background cross-species
+annotation evidence, and broader exploratory annotation evidence. When more
+than one evidence type occurs in the same family cell, the circles are nested;
+the legend shows the five evidence-state combinations observed in the plotted
+data. Cross-species annotation evidence is used to broaden biological context
+and is not treated as independent validation of the *G. pulex* response.
 
 ```{r figure4-output-check}
 data.frame(
