@@ -60,15 +60,12 @@ See [publication architecture](docs/publication_architecture.md), [artifact reco
 
 **Dataset citation**
 
-Escobar-Sierra, C., Weichert, F. G., Krauss, M., Hollert, H., & Inostroza, P. A. (2026). *Holtemme Gammarus ecotoxicogenomics research compendium* (Version v1.0.0) [Dataset]. Zenodo. [https://doi.org/10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)
+Escobar-Sierra, C., Brack, W., Hollert, H., Krauss, M., Weichert, F. G., & Inostroza, P. A. (2026). *Holtemme Gammarus ecotoxicogenomics research compendium* (Version v1.0.0) [Dataset]. Zenodo. [https://doi.org/10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)
 
 **Associated manuscript**
 
 Escobar-Sierra, C., Brack, W., Hollert, H., Krauss, M., Weichert, F. G., & Inostroza, P. A. *Field ecotoxicogenomics reveals transition-specific molecular responses in a freshwater sentinel across a wastewater-impacted river.*
 
-Camilo Escobar-Sierra is first author and Pedro A. Inostroza is senior/last author; the middle authors are ordered alphabetically by family name.
-
-Use the article citation once the manuscript is published. No article DOI is assigned here.
 
 ## License
 
