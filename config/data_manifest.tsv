@@ -2,16 +2,14 @@ asset_id	data_class	canonical_scope	external_resource_id	local_destination	redis
 META_STATION_CROSSWALK	study_metadata	DP01		metadata/station_crosswalk.csv	redistributable		Authoritative legacy-to-public site crosswalk.
 META_CONTRAST_CROSSWALK	study_metadata	DP04		metadata/contrast_crosswalk.csv	redistributable		Authoritative legacy-to-public contrast crosswalk.
 META_SAMPLE_PUBLICATION	study_metadata	DP02		metadata/holtemme_sample_metadata_publication.csv	redistributable		Publication-oriented sample metadata.
-META_CHEMISTRY_SITE_METRICS	derived_chemistry_descriptor	DP01		metadata/holtemme_chemistry_site_metrics.csv	released_with_v1.0.0		Derived site-level descriptor; not the primary concentration matrix.
+META_CHEMISTRY_SITE_METRICS	derived_chemistry_descriptor	DP01		metadata/holtemme_chemistry_site_metrics.csv	released_with_v1.0.1		Derived site-level descriptor; not the primary concentration matrix.
 EXT_CHEMISTRY	external_authoritative_source	DP01	10.5281/zenodo.22143080		referenced_not_duplicated		Weichert FG et al. 2026 primary micropollutant concentration archive; authoritative external source for chemistry provenance.
 EXT_RNASEQ	external_authoritative_source	DP02	SRP571512		referenced_not_duplicated		SRA accession for raw RNA-seq inputs; no raw reads are duplicated in this repository.
 EXT_TRANSCRIPTOME	external_authoritative_source	DP02	10.1038/s41597-025-05872-2		referenced_not_duplicated		Escobar-Sierra et al. 2025 Gammarus pulex transcriptome/annotation resource; identifier not recorded in current source and is intentionally not invented.
 DEP_ECHOGO	software_dependency	DP05	https://github.com/miloes114/EchoGo		pinned_external_dependency		EchoGO 0.1.4 pinned at commit dcf41371b20cccb2914852dc2c0436ecba62c559.
-DP01_CHEMISTRY_DERIVED	compact_analytical_input	DP01	10.5281/zenodo.22143080	DP01_chemistry	released_with_v1.0.0		Analysis-ready chemistry descriptors and Rmd-derived S1/S2 objects; primary concentration archive remains external.
-DP03_GLOBAL_TRANSCRIPTOME	compact_analytical_input	DP03	SRP571512	DP03_global_transcriptome_structure	released_with_v1.0.0		PCA, centroid-distance, distance-matrix, and RDA response tables used by Figures 2/S3/S4 and Tables S3/S4.
-DP04_DE_SUMMARY	compact_analytical_input	DP04		DP04_differential_expression	released_with_v1.0.0		Contrast summary and supporting DE summaries used by Figure 3 and Table S5.
-DP05_FUNCTIONAL	compact_analytical_input	DP05	https://github.com/miloes114/EchoGo	DP05_functional_evidence	released_with_v1.0.0		Functional provenance, candidate-gene display inputs, and EchoGO-pinned outputs used by Figure 4/S5 and Table S6.
-DP07_WGCNA_PAPER	compact_analytical_input	DP07		DP07_site_associated_modules	released_with_v1.0.0		Paper-facing WGCNA panels and decision evidence used by Figure 5 and Table S7.
-
-
+DP01_CHEMISTRY_DERIVED	compact_analytical_input	DP01	10.5281/zenodo.22143080	DP01_chemistry	released_with_v1.0.1		Analysis-ready chemistry descriptors and Rmd-derived S1/S2 objects; primary concentration archive remains external.
+DP03_GLOBAL_TRANSCRIPTOME	compact_analytical_input	DP03	SRP571512	DP03_global_transcriptome_structure	released_with_v1.0.1		PCA, centroid-distance, distance-matrix, and RDA response tables used by Figures 2/S3/S4 and Tables S3/S4.
+DP04_DE_SUMMARY	compact_analytical_input	DP04		DP04_differential_expression	released_with_v1.0.1		Contrast summary and supporting DE summaries used by Figure 3 and Table S5.
+DP05_FUNCTIONAL	compact_analytical_input	DP05	https://github.com/miloes114/EchoGo	DP05_functional_evidence	released_with_v1.0.1		Functional provenance, candidate-gene display inputs, and EchoGO-pinned outputs used by Figure 4/S5 and Table S6.
+DP07_WGCNA_PAPER	compact_analytical_input	DP07		DP07_site_associated_modules	released_with_v1.0.1		Paper-facing WGCNA panels and decision evidence used by Figure 5 and Table S7.
 

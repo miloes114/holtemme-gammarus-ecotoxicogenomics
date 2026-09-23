@@ -1,6 +1,6 @@
 # Reproducibility boundary
 
-This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. A complete Step 01-08 reconstruction requires the frozen processed inputs and prior-step outputs supplied in the published Zenodo v1.0.0 compendium ([10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)).
+This repository reproduces the ordered analytical workflow after the frozen processed inputs and reference resources have been materialized at their documented relative locations. A complete Step 01-08 reconstruction requires the frozen processed inputs and prior-step outputs supplied in the Zenodo v1.0.1 compendium ([10.5281/zenodo.22915067](https://doi.org/10.5281/zenodo.22915067)).
 
 DP01 contains derived chemistry descriptors and analysis-ready chemistry results used by this study. Primary LC-HRMS concentrations, upstream chemistry methodology, and authoritative chemical-use classification remain in the cited external chemistry resources. Those primary chemistry objects are intentionally not stored in GitHub.
 

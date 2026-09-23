@@ -1,16 +1,16 @@
 # Holtemme Gammarus Ecotoxicogenomics
 
-[![Zenodo DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22896087.svg)](https://doi.org/10.5281/zenodo.22896087)
+[![Zenodo DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22915067.svg)](https://doi.org/10.5281/zenodo.22915067)
 
 Reproducible workflow for field ecotoxicogenomics of wild *Gammarus pulex* across the wastewater-impacted Holtemme River, Germany. The study integrates micropollutant mixture characterisation, transcriptome-wide structure, differential expression, EchoGO v0.1.4 annotation-context evidence, functional-response synthesis, and WGCNA module analysis.
 
 ## Release
 
-The current frozen analytical release is **v1.0.0**. The Zenodo concept DOI for all versions is [10.5281/zenodo.22896086](https://doi.org/10.5281/zenodo.22896086).
+The current synchronized publication release is **v1.0.1**. The Zenodo concept DOI for all versions is [10.5281/zenodo.22896086](https://doi.org/10.5281/zenodo.22896086).
 
-**Research compendium:** Escobar-Sierra C, Weichert FG, Krauss M, Hollert H, Inostroza PA. *Holtemme Gammarus ecotoxicogenomics research compendium.* Zenodo, v1.0.0. [https://doi.org/10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)
+**Research compendium:** Escobar-Sierra C, Brack W, Hollert H, Krauss M, Weichert FG, Inostroza PA. *Holtemme Gammarus ecotoxicogenomics research compendium.* Zenodo, v1.0.1. [https://doi.org/10.5281/zenodo.22915067](https://doi.org/10.5281/zenodo.22915067)
 
-GitHub contains the executable workflow, compact metadata, documentation, configuration, tests, and bounded HTML reports. Zenodo contains the frozen DP01-DP07 research compendium, processed inputs, complete machine-readable outputs, publication-artifact sources, provenance, Supplementary Information, reports, and checksums. Tag `v1.0.0` is the exact analytical source snapshot associated with the Zenodo release; `main` may contain later documentation-only corrections.
+GitHub contains the executable workflow, compact metadata, documentation, configuration, tests, and bounded HTML reports. Zenodo contains the complete v1.0.1 DP01-DP07 research compendium, processed inputs, complete machine-readable outputs, publication-artifact sources, provenance, Supplementary Information, reports, and checksums. Tag `v1.0.0` remains the immutable analytical source snapshot for the previous release; tag `v1.0.1` is the current publication-synchronization source state.
 
 ## Workflow
 
@@ -39,11 +39,11 @@ Rscript scripts/validate_project.R
 Rscript scripts/validate_publication_artifacts.R
 ```
 
-A complete Step 01-08 reconstruction requires the frozen processed inputs and prior-step outputs supplied in the [Zenodo v1.0.0 compendium](https://doi.org/10.5281/zenodo.22896087). The workflow uses documented relative paths and does not duplicate external authoritative records.
+A complete Step 01-08 reconstruction requires the frozen processed inputs and prior-step outputs supplied in the [Zenodo v1.0.1 compendium](https://doi.org/10.5281/zenodo.22915067). The workflow uses documented relative paths and does not duplicate external authoritative records.
 
 ## Data availability
 
-- Research compendium v1.0.0: [DOI 10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087).
+- Research compendium v1.0.1: [DOI 10.5281/zenodo.22915067](https://doi.org/10.5281/zenodo.22915067).
 - Primary Holtemme LC-HRMS chemistry: [DOI 10.5281/zenodo.22143080](https://doi.org/10.5281/zenodo.22143080).
 - Raw RNA-seq reads: SRA `SRP571512`.
 - Published *Gammarus pulex* transcriptome and annotation: Escobar-Sierra et al. 2025, [DOI 10.1038/s41597-025-05872-2](https://doi.org/10.1038/s41597-025-05872-2).
@@ -60,7 +60,7 @@ See [publication architecture](docs/publication_architecture.md), [artifact reco
 
 **Dataset citation**
 
-Escobar-Sierra, C., Brack, W., Hollert, H., Krauss, M., Weichert, F. G., & Inostroza, P. A. (2026). *Holtemme Gammarus ecotoxicogenomics research compendium* (Version v1.0.0) [Dataset]. Zenodo. [https://doi.org/10.5281/zenodo.22896087](https://doi.org/10.5281/zenodo.22896087)
+Escobar-Sierra, C., Brack, W., Hollert, H., Krauss, M., Weichert, F. G., & Inostroza, P. A. (2026). *Holtemme Gammarus ecotoxicogenomics research compendium* (Version v1.0.1) [Dataset]. Zenodo. [https://doi.org/10.5281/zenodo.22915067](https://doi.org/10.5281/zenodo.22915067)
 
 **Associated manuscript**
 
