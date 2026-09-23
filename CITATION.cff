@@ -14,15 +14,18 @@ authors:
   - family-names: Escobar-Sierra
     given-names: Camilo
     orcid: "https://orcid.org/0000-0001-9105-4378"
-  - family-names: Weichert
-    given-names: Fabian G.
-    orcid: "https://orcid.org/0000-0002-5995-6790"
-  - family-names: Krauss
-    given-names: Martin
-    orcid: "https://orcid.org/0000-0002-0362-4244"
+  - family-names: Brack
+    given-names: Werner
+    orcid: "https://orcid.org/0000-0001-9269-6524"
   - family-names: Hollert
     given-names: Henner
     orcid: "https://orcid.org/0000-0001-5776-5619"
+  - family-names: Krauss
+    given-names: Martin
+    orcid: "https://orcid.org/0000-0002-0362-4244"
+  - family-names: Weichert
+    given-names: Fabian G.
+    orcid: "https://orcid.org/0000-0002-5995-6790"
   - family-names: Inostroza
     given-names: Pedro A.
     orcid: "https://orcid.org/0000-0001-7399-8308"
@@ -33,15 +36,18 @@ preferred-citation:
     - family-names: Escobar-Sierra
       given-names: Camilo
       orcid: "https://orcid.org/0000-0001-9105-4378"
-    - family-names: Weichert
-      given-names: Fabian G.
-      orcid: "https://orcid.org/0000-0002-5995-6790"
-    - family-names: Krauss
-      given-names: Martin
-      orcid: "https://orcid.org/0000-0002-0362-4244"
+    - family-names: Brack
+      given-names: Werner
+      orcid: "https://orcid.org/0000-0001-9269-6524"
     - family-names: Hollert
       given-names: Henner
       orcid: "https://orcid.org/0000-0001-5776-5619"
+    - family-names: Krauss
+      given-names: Martin
+      orcid: "https://orcid.org/0000-0002-0362-4244"
+    - family-names: Weichert
+      given-names: Fabian G.
+      orcid: "https://orcid.org/0000-0002-5995-6790"
     - family-names: Inostroza
       given-names: Pedro A.
       orcid: "https://orcid.org/0000-0001-7399-8308"
