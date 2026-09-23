@@ -52,7 +52,7 @@ DP01 contains derived chemistry descriptors and analysis-ready chemistry results
 
 ## Publication artifacts
 
-The release maps Main Figures 1-5, Supplementary Figures S1-S5, and Supplementary Tables S1-S7 to their source data and provenance through `config/publication_artifact_registry.tsv`, `config/plot_registry.tsv`, and `config/zenodo_deposit_manifest.tsv`. Figure 4 uses the final EchoGO v0.1.4 evidence hierarchy. Supplementary Figure S5 uses the final 16-gene target-supported candidate panel. Figure 5 is the final site-associated WGCNA module figure.
+The release maps Main Figures 1-5, Supplementary Figures S1-S5, and Supplementary Tables S1-S7 to their source data and provenance through `config/publication_artifact_registry.tsv`, `config/plot_registry.tsv`, and `config/zenodo_deposit_manifest.tsv`. Figure 4 uses the final EchoGO v0.1.4 evidence synthesis with an observed-state legend. Supplementary Figure S5 uses the final 16-gene target-supported candidate panel. Figure 5 is the final site-associated WGCNA module figure.
 
 See [publication architecture](docs/publication_architecture.md), [artifact reconciliation](docs/publication_artifact_reconciliation.md), and [site identifiers](docs/site_identifiers.md).
 
